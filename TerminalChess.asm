@@ -11,6 +11,8 @@ include Macros.inc
 ; The next 2 bits signify if the piece has moved once and twice respectively
 ; The 4 right-most bits signify the PIECE TYPE
 
+INPUT_SIZE EQU 5
+
 ; Color - Used when printing the board
 IS_BLACK    EQU 10000000b
 ; Default color is used when both bits are 0
@@ -21,7 +23,7 @@ SYM_QUEEN   EQU "Q"
 SYM_KNIGHT  EQU "N"
 SYM_BISHOP  EQU "B"
 SYM_ROOK    EQU "R"
-SYM_PAWN    EQU "P"
+SYM_PAWN    EQU "p"
 SYM_BLANK   EQU "-"
 
 ; Piece Types
@@ -56,10 +58,16 @@ GAMEOVER        EQU 00000010b
 IS_IN_CHECK     EQU 00001000b
 IS_BLACK_TURN   EQU 10000000b
 
+; FEEDBACK
+INVALID_MOVE        EQU 00000001b
+MOVE_OUTSIDE_RANGE  EQU 00000010b
+KING_LEFT_IN_CHECK  EQU 00000100b
+
 
 .data
 
-    userInput BYTE 6 DUP(0)
+    chess_title BYTE "Terminal Chess",0
+    userInput BYTE INPUT_SIZE DUP(0)
 
 Piece STRUCT
     jumpDist BYTE ?         ; Hex - 2 hex digits that control how far one jump is
@@ -74,6 +82,7 @@ Piece ENDS
     PAWN_MOVE Piece     <01h, 00011000b>
 
     GAME_STATUS BYTE 0
+    FEEDBACK BYTE 0
     FIFTY_MOVE_RULE BYTE 0
 
 
@@ -83,24 +92,25 @@ Piece ENDS
 .code
 
 main PROC
-    AGAIN:
+    invoke SetConsoleTitle, OFFSET chess_title
+    PLAY_AGAIN:
     call chess
 
-    INVALID:
+    INVALID_MENU:
     mwriteln<"Do you want to play again? [y/n]:  ">
     mov edx, OFFSET userInput
     mov ecx, sizeof userInput
     call ReadChar
     call YesOrNo
-    jc AGAIN    ; if answer was y
-    jz SKIP     ; if answer was n
+    jc PLAY_AGAIN   ; if answer was y
+    jz QUIT_GAME    ; if answer was n
 
     ; else input is invalid
     mwriteln <"Invalid Input. Try again!">
 
-    jmp INVALID
+    jmp INVALID_MENU
 
-    SKIP:
+    QUIT_GAME:
     exit
 
 main ENDP
@@ -108,15 +118,22 @@ main ENDP
 .code
 
 chess PROC
-    ; Init Console
-    mov eax, white + (black*16)
-    call SetTextColor
-    call Clrscr
 
     call initChessboard
 
     StartTurn:
-
+    mGotoxy 0,0
+    call Clrscr
+    call PrintChessboard
+    call PrintWhoseTurn
+    call PrintFeedback
+    
+    GET_INPUT:
+    call GetChessInput
+    call ProcessInput   ; Turns input coords into range from 0-7
+    mov al, FEEDBACK    ; If ProcessInput got something out of range
+    test al, 0FFh
+    jnz StartTurn
 
 
 
@@ -124,7 +141,64 @@ chess PROC
     ret
 chess ENDP
 
-initChessboard PROC
+GetChessInput PROC
+    mGotoxy 17,20
+
+    mov edx, OFFSET userInput
+    mov ecx, INPUT_SIZE
+    call ReadString
+
+    ret
+GetChessInput ENDP
+
+ProcessInput PROC
+    ; Convert characters to decimal values
+    ; Letter
+    mov al, [userInput]
+    sub al, 97
+    jl RANGE_ERROR          ; Check if it goes below 0
+    mov [userInput], al
+    ; Number
+    mov al, [userInput+1]
+    sub al, 49
+    jl RANGE_ERROR          ; Check if it goes below 0
+    mov [userInput+1], al
+    ; Letter
+    mov al, [userInput+2]
+    sub al, 97
+    jl RANGE_ERROR          ; Check if it goes below 0
+    mov [userInput+2], al
+    ; Number
+    mov al, [userInput+3]
+    sub al, 49
+    jl RANGE_ERROR          ; Check if it goes below 0
+    mov [userInput+3], al
+
+
+    ; Check if it is above 7
+    mov al, [userInput]
+    cmp al, 7
+    jg RANGE_ERROR
+    mov al, [userInput+1]
+    cmp al, 7
+    jg RANGE_ERROR
+    mov al, [userInput+2]
+    cmp al, 7
+    jg RANGE_ERROR
+    mov al, [userInput+3]
+    cmp al, 7
+    jg RANGE_ERROR
+
+    jmp SKIP
+
+    RANGE_ERROR:
+    mov FEEDBACK, MOVE_OUTSIDE_RANGE
+
+    SKIP:
+    ret
+ProcessInput ENDP
+
+InitChessboard PROC
 
     ; BLACK
     mov [CHESSBOARD+0], BLACK_ROOK
@@ -164,22 +238,102 @@ initChessboard PROC
     dec cl
     jnz PlaceWhitePawns
 
-    call printChessboard
-
     ret
-initChessboard ENDP
+InitChessboard ENDP
 
-printChessboard PROC
+PrintWhoseTurn PROC
+    mov al, GAME_STATUS
+    test al, IS_BLACK_TURN
+    jnz BLACK_TURN
+
+    mWriteln <"White's turn">
+    jmp SKIP
+
+    BLACK_TURN:
+    mWriteln <"Black's turn">
+
+    SKIP:
+    mWriteln <"------------">
+    mWriteln <"Enter your move: ">
+    call crlf
+    ret
+PrintWhoseTurn ENDP
+
+PrintChessboard PROC
     pushad
 
     mGotoxy 0, 0
 
     ; Loop through Chessboard
-    mov cl, 8
-    mov ch, 8
-    mov esi, OFFSET CHESSBOARD
+    mov cl, 8   ; columns
+    mov ch, 8   ; rows
+    mov dl, 1   ; incrementer for esi and row/column labels
 
+    mov al, GAME_STATUS
+    test al, IS_BLACK_TURN
+    jnz PrintBlackTurn
+
+    ; PrintWhiteTurn
+    mov esi, OFFSET CHESSBOARD
+    mov dh, 8   ; Row labels start at 8
+    neg dl      ; and count down
+    jmp RowStart
+
+    PrintBlackTurn:
+    mov esi, OFFSET CHESSBOARD+63
+    mov dh, 1   ; Row labels start at 1 and count up
+
+
+    ; print the row number
     RowStart:
+    mov eax, white + (black*16) ; Set Text color to white
+    call SetTextColor
+    movzx eax, dh               ; Print Row Number
+    call WriteDec
+    mWrite <"   ">
+
+    PieceStart:
+    call PrintPiece
+
+    movsx ebx, dl
+    neg ebx
+    add esi, ebx
+    dec cl
+    jnz PieceStart
+    call crlf
+    call crlf
+    mov cl, 8
+    add dh, dl
+    dec ch
+    jnz RowStart
+
+    ; Reset Text Color
+    mov eax, white + (black*16)
+    call SetTextColor
+
+    ; Print the column labels
+    neg dl
+    mov cl, 8
+    mov al, dh  ; White's view, dh = 0. Black's view, dh = 8
+    add al, 97  ; Ascii value for lowercase a
+    mWrite <"x   ">
+    ColumnLabel:
+    call WriteChar
+    mWrite <"   ">
+    add al, dl
+    dec cl
+    jnz ColumnLabel
+
+    call crlf
+    call crlf
+
+    popad
+    ret
+PrintChessboard ENDP
+
+PrintPiece PROC
+    push edx
+
     ; Check which piece type is on the square
     mov al, BYTE PTR [esi]
     and al, PAWN
@@ -212,23 +366,23 @@ printChessboard PROC
     ; Save character to DL
     PrintPawn:
     mov dl, SYM_PAWN
-    jmp PrintPiece
+    jmp PrintP
     PrintRook:
     mov dl, SYM_ROOK
-    jmp PrintPiece
+    jmp PrintP
     PrintKnight:
     mov dl, SYM_KNIGHT
-    jmp PrintPiece
+    jmp PrintP
     PrintBishop:
     mov dl, SYM_BISHOP
-    jmp PrintPiece
+    jmp PrintP
     PrintQueen:
     mov dl, SYM_QUEEN
-    jmp PrintPiece
+    jmp PrintP
     PrintKing:
     mov dl, SYM_KING
 
-    PrintPiece:
+    PrintP:
     ; Check the color of square
     mov al, BYTE PTR [esi]
     and al, 10000000b
@@ -254,23 +408,41 @@ printChessboard PROC
     call WriteChar
     mWrite <"   ">
 
-    inc esi
-    dec cl
-    jnz RowStart
-    call crlf
-    call crlf
-    mov cl, 8
-    dec ch
-    jnz RowStart
+    pop edx
+    ret
+PrintPiece ENDP
 
-    ; Reset Text Color
+PrintFeedback PROC
+    mov al, FEEDBACK
+    test al, 0FFh
+    jz END_OF_FEEDBACK
+
+    test al, MOVE_OUTSIDE_RANGE
+    jnz OUTSIDE_RANGE
+
+
+    test al, INVALID_MOVE
+    jnz INVALID_MOVE_F
+    
+    jmp END_OF_FEEDBACK
+
+    OUTSIDE_RANGE:
+    mov eax, red + (black*16)
+    call SetTextColor
+    mWriteln <"Invalid Syntax / Outside Range!">
+    jmp END_OF_FEEDBACK
+    INVALID_MOVE_F:
+    mov eax, red + (black*16)
+    call SetTextColor
+    mWriteln <"Invalid Move!">
+
+
+    END_OF_FEEDBACK:
     mov eax, white + (black*16)
     call SetTextColor
-
-    popad
+    mov FEEDBACK, 0
     ret
-printChessboard ENDP
-
+PrintFeedback ENDP
 
 
 ; HELPER PROCEDURES
@@ -295,7 +467,7 @@ YesOrNo PROC uses eax ebx ecx edx esi edi
     cmp al, 'N'
     je SETZERO
     
-    or al,1   ; clear zero flag
+    or al,1     ; clear zero flag
     clc         ; clear carry flag
     jmp SKIP
 
