@@ -38,6 +38,7 @@ PAWN    EQU 06h
 ; Special Conditions
 HAS_MOVED           EQU 00100000b
 IS_EN_PASSANTABLE   EQU 00010000b
+NO_EN_PASSANT       EQU 11101111b
 
 ; Movement Abilities
 DIAGONAL        EQU 00000001b
@@ -82,7 +83,7 @@ ERROR_KING_CAPTURE  EQU 9
     KNIGHT_MOVE BYTE    00010100b
     BISHOP_MOVE BYTE    10000001b
     ROOK_MOVE BYTE      10000010b
-    PAWN_MOVE BYTE      00011000b
+    PAWN_MOVE BYTE      00101000b
 
     GAME_STATUS BYTE 0
     FEEDBACK BYTE 0
@@ -136,6 +137,8 @@ chess PROC
     mov ebx, 0
     mov ecx, 0
     mov edx, 0
+    mov esi, 0
+    mov edi, 0
     call GetChessInput
     call ProcessInput   ; Turns input coords into range from 0-7
     mov al, FEEDBACK    
@@ -160,13 +163,28 @@ chess PROC
     ret
 chess ENDP
 
+; Used in checking a move is valid, then confirming each piece isn't targeting the king
 InputToMove PROC
     push edx
     push ecx
+    ; Everything is reset to 0 before moving a piece. We only want to save edi when running this procedure in VerifyMove
+    cmp ecx, 0
+    jne SKIP_PUSH_EDI
+    push edi
+    SKIP_PUSH_EDI:
     ; Get First Piece
     mov esi, OFFSET userInput
     mov edx, [esi]              ; Copies userInput (a2c4[0123] in memory -> 3c2a[3210] in edx)
     call MoveSPointerToSquare   ; Move esi to the coords in dx
+
+    ; This only matters when verifying move, skip the piece if it's the one that was moved
+    cmp esi, edi
+    je SKIP
+
+    ; Remove IS_EN_PASSANTABLE (Pawns can only be en passanted the move after, so we're removing the attribute)
+    mov bl, [esi]
+    and bl, NO_EN_PASSANT
+    mov BYTE PTR [esi], bl
 
     ; Check piece type
     mov al, [esi]               ; Get square info
@@ -296,10 +314,7 @@ InputToMove PROC
     jne DIAGONAL_RET            ; If not equal, go back and check other move types
 
     ; normalize vectors (make them equal 1 but keep sign)
-    sar al, 7
-    sar ah, 7
-    or al, 1
-    or ah, 1
+    call NormalizeVectors
     call CheckPath      ; Check path
     jmp SKIP
     
@@ -324,20 +339,7 @@ InputToMove PROC
     ror cx, 8           ; redo so non 0 is in cl (CheckPath needs this)
     IS_PARALLEL:
     ; normalize vectors conditionally
-    test al, 0FFh
-    jz SKIP_X           ; If al = 0, skip
-
-    sar al, 7
-    or al, 1
-
-    SKIP_X:
-    test ah, 0FFh       ; If ah = 0, skip
-    jz SKIP_Y
-
-    sar ah, 7
-    or ah, 1
-
-    SKIP_Y:
+    call NormalizeVectorsConditional
     call CheckPath      ; Check path
     jmp SKIP
 
@@ -353,7 +355,7 @@ InputToMove PROC
     ror cx, 8           ; rotate bits
     cmp cx, 0201h
     ror cx, 8           ; undo in case of return
-    jg LSHAPE_RET       ; If cx != 0201h, go back and check other move types
+    jne LSHAPE_RET      ; If cx != 0201h, go back and check other move types
     
     mov cl, 1           ; cl = 1 (CheckPath needs this)
     IS_LSHAPE:
@@ -362,13 +364,110 @@ InputToMove PROC
     jmp SKIP
 
     FORWARD_ONLY_LOGIC:
-    jmp FORWARD_ONLY_RET
+    ; Check for a single jump or a double jump
+    test ch, 1
+    jz CHECK_DOUBLE         ; If change in y != 1, check double jump
+
+    ; else check if capture
+    cmp cx, 0100h
+    je CHECK_DIRECTION      ; If change in y == 1 AND change in y == 0, continue
+    cmp cx, 0101h
+    jne FORWARD_ONLY_RET    ; If change in y != 1 OR change in y != 1, go back and give feedback
+
+    ; else check if valid capture
+    mov dl, [edi]
+    test dl, 0Fh            
+    jnz CHECK_DIRECTION         ; If square not empty, continue (Normal capture)
+
+    mov edi, esi                ; Move edi to esi
+    movsx edx, al               
+    neg edx
+    add edi, edx                ; add change in x to edi (En passant checks for piece next to pawn)
+
+    mov dl, [edi]
+    test dl, IS_EN_PASSANTABLE
+    jz FORWARD_ONLY_RET         ; If piece next to pawn can't be en passanted, go back and give feedback
+
+    mov dl, [edi]               ; Get square info
+    mov dh, GAME_STATUS         ; Get Game Status
+    and dl, 80h                 ; Isolate piece's is_black bit
+    and dh, 80h                 ; Isolate game status's is_black_turn bit
+    xor dl, dh                  ; Check if the color is different
+    jnz CHECK_DIRECTION         ; If color is different, continue
+    
+    jmp FORWARD_ONLY_RET        ; else go back and give feedback
+
+    CHECK_DOUBLE:
+    cmp cx, 0200h
+    jne FORWARD_ONLY_RET        ; If change in y != 2 OR change in x != 0, go back and give feedback
+    mov dl, [esi]
+    test dl, HAS_MOVED
+    jnz FORWARD_ONLY_RET         ; If has moved already, go back and give feedback
+
+    CHECK_DIRECTION:
+    ; xor table IS_BLACK bit
+    ; ah = 1, GS = 1 -> 0 (Moving up as white, Is black's turn) 
+    ; ah = 0, GS = 1 -> 1 (Moving up as black, Is black's turn)
+    ; ah = 1, GS = 0 -> 1 (Moving up as white, Is white's turn)
+    ; ah = 0, GS = 0 -> 0 (Moving up as black, Is white's turn)
+    mov dh, ah              ; move ah to dh
+    mov dl, GAME_STATUS
+    and dl, 80h             ; Isolate game status's IS_BLACK_TURN bit
+    xor dh, GAME_STATUS     ; bit is 1 when correct direction
+    and dh, IS_BLACK_TURN   ; Checks if bit is 1 or 0
+    jz FORWARD_ONLY_RET     ; If incorrect direction, go back and give feedback
+
+    ; Final check, if move isn't diagonal and there's a piece ahead, don't capture
+    cmp cl, 0
+    jne F_ONLY_CONTINUE     ; If horizontal movement not 0, continue
+
+    ; else check destination
+    mov dl, [edi]
+    test dl, 0FFh
+    jnz FORWARD_ONLY_RET    ; If square not empty, go back and give feedback
+    
+    F_ONLY_CONTINUE:
+    mov cl, ch              ; CheckPath uses cl as the loop condition, so put the forward jump distance into it
+
+    ; normalize vectors conditionally
+    call NormalizeVectorsConditional
+    call CheckPath
 
     SKIP:
     pop ecx
     pop edx
+    cmp ecx, 0
+    jne SKIP_POP_EDI
+    pop edi
+    SKIP_POP_EDI:
     ret
 InputToMove ENDP
+
+NormalizeVectors PROC
+    sar al, 7
+    sar ah, 7
+    or al, 1
+    or ah, 1
+    ret
+NormalizeVectors ENDP
+
+NormalizeVectorsConditional PROC
+    test al, 0FFh
+    jz SKIP_X           ; If al = 0, skip
+
+    sar al, 7
+    or al, 1
+
+    SKIP_X:
+    test ah, 0FFh       ; If ah = 0, skip
+    jz SKIP_Y
+
+    sar ah, 7
+    or ah, 1
+
+    SKIP_Y:
+    ret
+NormalizeVectorsConditional ENDP
 
 ; takes the coords in edx and return the difference
 ; al is difference in x, cl is the absolute value
@@ -413,21 +512,21 @@ CheckPath PROC
     jmp SKIP
 
     LOOP_START:
+    ; Searching through path
+    movsx edx, ah
+    add esi, edx                ; Move over row
+    movsx edx, al
+    add esi, edx                ; Move over column
 
-    movsx ebx, ah
-    add esi, ebx        ; Move over row
-    movsx ebx, al
-    add esi, ebx        ; Move over column
-
-    mov bl, [esi]       ; Get next square in path
+    mov dl, [esi]               ; Get next square in path
 
     dec cl
-    jz AFTER_LOOP       ; If we have no more jumps, go to end of loop
+    jz AFTER_LOOP               ; If we have no more jumps, go to end of loop
 
-    test bl, 0Fh    
+    test dl, 0Fh        
     jz LOOP_START               ; If not a piece, continue loop
 
-    mov FEEDBACK, BLOCKED_PATH  ; else set feedback and end
+    mov FEEDBACK, BLOCKED_PATH  ; else set feedback and go back
     jmp SKIP
 
     AFTER_LOOP:
@@ -435,23 +534,28 @@ CheckPath PROC
     cmp esi, edi    
     je KING_CHECK               ; If source and destination are equal, continue
 
-    mov FEEDBACK, ERROR_PATH
+    mov dl, [edi]               ; Else check en passant
+    test dl, IS_EN_PASSANTABLE
+    jnz SKIP                    ; If en passantable, continue (Don't bother checking for king, king will never be en passantable)
+
+    mov FEEDBACK, ERROR_PATH    ; else set feedback and go back
     jmp SKIP
 
+    ; Check if king is trying to be captured
     KING_CHECK:
-    mov al, [edi]               ; Get square info
-    and al, 0Fh                 ; Isolate piece type
+    mov al, [edi]                       ; Get square info
+    and al, 0Fh                         ; Isolate piece type
     cmp al, KING
-    jne SKIP                    ; If not trying to capture king, continue
+    jne SKIP                            ; If not trying to capture king, continue
 
-    mov FEEDBACK, ERROR_KING_CAPTURE
+    mov FEEDBACK, ERROR_KING_CAPTURE    ; Else give feedback
 
     SKIP:
     pop esi
     ret
 CheckPath ENDP
 
-; Confirms that the move is valid.
+; Confirms that the move is valid by testing it on a copy of the chessboard
 ; If it is, do the move. if it isn't, produce feedback
 VerifyMove PROC
     ; Make a copy of the chessboard
@@ -473,15 +577,50 @@ VerifyMove PROC
     
     pop edi
     pop esi
-
+  
+    ; Mark the piece as en passant if it's a pawn and a double square jump
     mov al, [esi]
+    and al, 0Fh
+    cmp al, PAWN
+    jne CHECK_MOVE_TYPE     ; If not a pawn, continue to CHECK_MOVE_TYPE
+    mov ebx, esi
+    sub ebx, edi
+    cmp ebx, 16
+    je SET_EN_PASSANT
+    neg ebx
+    cmp ebx, 16
+    jne CHECK_MOVE_TYPE
+    
+    SET_EN_PASSANT:
+    mov al, [esi]
+    or al, IS_EN_PASSANTABLE
+    mov BYTE PTR [esi], al
+
+    CHECK_MOVE_TYPE:
+    mov al, [edi]      
+    test al, IS_EN_PASSANTABLE
+    jz NORMAL_MOVE              ; If destination square is not en passantable, go to NORMAL_MOVE
+
+    mov al, [esi]               
+    or al, HAS_MOVED            ; Mark HAS_MOVED bit for moving piece
+    mov BYTE PTR [esi], 0
+    mov BYTE PTR [edi], 0
+    movsx ecx, ah               
+    add edi, ecx                ; Move destination pointer forward one row
+    mov BYTE PTR [edi], al
+    jmp START_KING_SEARCH
+
+    NORMAL_MOVE:
+    mov al, [esi]
+    or al, HAS_MOVED            ; Mark HAS_MOVED bit for moving piece
     mov BYTE PTR [edi], al      ; Overwrite destination with moving piece
     mov BYTE PTR [esi], 0       ; Cover up tracks
 
+    START_KING_SEARCH:
     mov esi, OFFSET CHESSBOARD
     mov cl, 64
     
-    CHECK_FOR_KING:
+    KING_SEARCH:
     mov al, [esi]
     and al, 0Fh
     cmp al, KING
@@ -502,7 +641,7 @@ VerifyMove PROC
     SKIP_KING:
     inc esi
     dec cl
-    jnz CHECK_FOR_KING
+    jnz KING_SEARCH
 
     END_KING_SEARCH:
     mov ebx, esi
@@ -526,7 +665,7 @@ VerifyMove PROC
     ror edx, 16                 ; Rotate king position to the destination side of edx
     
     ; Now we're going to loop through all pieces and see if they have a valid path to the king
-    ; Temp change to other color
+    ; Temp change to other color so the input validation doesn't get in the way
     mov al, GAME_STATUS
     xor al, IS_BLACK
     mov GAME_STATUS, al
@@ -537,12 +676,13 @@ VerifyMove PROC
     
     CHECK_FOR_ATTACKER:
     mov [userInput], dl 
-    mov [userInput+1], dh 
+    mov [userInput+1], dh
     call InputToMove
     mov cl, FEEDBACK
     cmp cl, ERROR_KING_CAPTURE
     je IS_ATTACKER
 
+    SKIP_PIECE:
     mov FEEDBACK, 0
     dec dl
     jns CHECK_FOR_ATTACKER
@@ -648,16 +788,17 @@ InitChessboard PROC
     mov [CHESSBOARD+6], BLACK_KNIGHT
     mov [CHESSBOARD+7], BLACK_ROOK
 
-    ;mov cl, 8
-    ;mov esi, OFFSET [CHESSBOARD+8]
+    mov cl, 8
+    mov esi, OFFSET [CHESSBOARD+8]
 
     PlaceBlackPawns:
-    ;mov BYTE PTR [esi], BLACK_PAWN
-    ;inc esi
-    ;dec cl
-    ;jnz PlaceBlackPawns
+    mov BYTE PTR [esi], BLACK_PAWN
+    inc esi
+    dec cl
+    jnz PlaceBlackPawns
 
     ; WHITE
+    mov [CHESSBOARD+24], PAWN
     mov [CHESSBOARD+56], ROOK
     mov [CHESSBOARD+57], KNIGHT
     mov [CHESSBOARD+58], BISHOP
@@ -671,10 +812,10 @@ InitChessboard PROC
     mov esi, OFFSET [CHESSBOARD+48]
 
     PlaceWhitePawns:
-    ;mov BYTE PTR [esi], PAWN
-    ;inc esi
-    ;dec cl
-    ;jnz PlaceWhitePawns
+    mov BYTE PTR [esi], PAWN
+    inc esi
+    dec cl
+    jnz PlaceWhitePawns
 
     ret
 InitChessboard ENDP
