@@ -4,6 +4,9 @@
 include Irvine32.inc
 include Macros.inc
 
+include SmallHelpers.inc
+include ChessFeedback.inc
+
 ; PIECE INFORMATION
 
 ; The pieces on the board are stored as BYTES
@@ -60,16 +63,7 @@ GAMEOVER        EQU 00000010b
 IS_IN_CHECK     EQU 00001000b
 IS_BLACK_TURN   EQU 10000000b
 
-; FEEDBACK
-INVALID_MOVE        EQU 1
-MOVE_OUTSIDE_RANGE  EQU 2
-KING_LEFT_IN_CHECK  EQU 3
-EMPTY_SQUARE_MOVE   EQU 4
-MISMATCH_COLOR      EQU 5
-MISMATCH_COLOR_DEST EQU 6
-BLOCKED_PATH        EQU 7
-ERROR_PATH          EQU 8
-ERROR_KING_CAPTURE  EQU 9
+
 
 
 .data
@@ -77,7 +71,7 @@ ERROR_KING_CAPTURE  EQU 9
     chess_title BYTE "Terminal Chess",0
     userInput BYTE INPUT_SIZE DUP(0)
 
-    ; 4 left bits hold max number of jumps, 4 right bits hold move abilities
+    ; 4 left bits hold max number of jumps, 4 right bits hold move abilities (diagonal, parallel, etc)
     KING_MOVE BYTE      00010011b
     QUEEN_MOVE BYTE     10000011b
     KNIGHT_MOVE BYTE    00010100b
@@ -86,9 +80,7 @@ ERROR_KING_CAPTURE  EQU 9
     PAWN_MOVE BYTE      00101000b
 
     GAME_STATUS BYTE 0
-    FEEDBACK BYTE 0
     FIFTY_MOVE_RULE BYTE 0
-
 
     CHESSBOARD BYTE 64 DUP(0)
     CHESSBOARD_COPY BYTE 64 DUP(0)
@@ -119,58 +111,56 @@ main PROC
 
 main ENDP
 
-.code
-
 chess PROC
-
+    
+    ; Initialize Chessboard
     call initChessboard
 
     StartTurn:
-    mGotoxy 0,0
-    call Clrscr
-    call PrintChessboard
-    call PrintWhoseTurn
-    call PrintFeedback
+        call Clrscr             ; Clear Screen
+        mGotoxy 0, 0            ; Move Console cursor to beginning
+        call PrintChessboard
+        call PrintWhoseTurn
+        PrintFeedback
     
     GET_INPUT:
-    mov eax, 0
-    mov ebx, 0
-    mov ecx, 0
-    mov edx, 0
-    mov esi, 0
-    mov edi, 0
-    call GetChessInput
-    call ProcessInput   ; Turns input coords into range from 0-7
-    mov al, FEEDBACK    
-    test al, 0FFh       
-    jnz StartTurn       ; If ProcessInput set a FEEDBACK flag, go back
+        ; Clear registers
+        mov eax, 0
+        mov ebx, 0
+        mov ecx, 0
+        mov edx, 0
+        mov esi, 0
+        mov edi, 0
+        call GetChessInput  ; Ask the player for input
+        call ProcessInput   ; Turns ascii input coords in userInput into range from 0-7
+        GetFeedback         ; move FEEDBACK Byte into al
+        cmp al, 0
+        jne StartTurn       ; If FEEDBACK != 0, restart turn
 
-    call InputToMove
-    mov al, FEEDBACK    
-    test al, 0FFh
-    jnz StartTurn       ; If InputToMove set a FEEDBACK flag, go back
+        call InputToMove    ; Check if move from source to destination is valid
+        GetFeedback         ; move FEEDBACK Byte into al
+        cmp al, 0
+        jne StartTurn       ; If FEEDBACK != 0, restart turn
 
-    call VerifyMove
-    mov al, FEEDBACK
-    test al, 0FFh
-    jnz StartTurn
+        call VerifyMove     ; Second round of input validation (Leaving king in check, etc)
+        GetFeedback         ; move FEEDBACK Byte into al
+        cmp al, 0
+        jne StartTurn       ; If FEEDBACK != 0, restart turn
 
+    ; Switch turn
     mov al, GAME_STATUS
     xor al, IS_BLACK
     mov GAME_STATUS, al
-    jmp StartTurn
+    jmp StartTurn           ; Loop back if game not over
     
     ret
 chess ENDP
 
-; Used in checking a move is valid, then confirming each piece isn't targeting the king
-InputToMove PROC
-    push edx
-    push ecx
-    ; Everything is reset to 0 before moving a piece. We only want to save edi when running this procedure in VerifyMove
+; Used in checking a move is valid
+InputToMove PROC uses edx ecx
     cmp ecx, 0
-    jne SKIP_PUSH_EDI
-    push edi
+    jne SKIP_PUSH_EDI   ; If ecx != 0, don't push edi (This is true at the start of the turn. False when running this from VerifyMove)
+    push edi            ; See VerifyMove to know why we push edi
     SKIP_PUSH_EDI:
     ; Get First Piece
     mov esi, OFFSET userInput
@@ -202,7 +192,7 @@ InputToMove PROC
     cmp al, KING
     je KING_LOGIC
 
-    mov FEEDBACK, EMPTY_SQUARE_MOVE
+    SetFeedback EMPTY_SQUARE_MOVE
     jmp SKIP
     
     PAWN_LOGIC:
@@ -250,7 +240,7 @@ InputToMove PROC
     xor al, ah                  ; Check if the color is the same
     jz SOURCE_CORRECT_COLOR     ; If same, continue
 
-    mov FEEDBACK, MISMATCH_COLOR
+    SetFeedback MISMATCH_COLOR
     jmp SKIP
 
     SOURCE_CORRECT_COLOR:
@@ -260,35 +250,25 @@ InputToMove PROC
     ror edx, 16                 ; Switch dx back to source square
 
     ; Check if there is a piece there
-    mov al, [edi]               ; Get square info
+    mov al, [edi]               ; Get destination square info
     and al, 0Fh                 ; Isolate piece type
-    cmp al, PAWN
-    je CHECK_COLOR
-    cmp al, QUEEN
-    je CHECK_COLOR
-    cmp al, KNIGHT
-    je CHECK_COLOR
-    cmp al, BISHOP
-    je CHECK_COLOR
-    cmp al, ROOK
-    je CHECK_COLOR
-    cmp al, KING
-    je CHECK_COLOR
+    cmp al, 0
+    jne CHECK_COLOR             ; If al != 0 (not empty), check color
 
     jmp DONT_CHECK_COLOR
 
     CHECK_COLOR:
-    ; ah already has game status's color bit
-    mov al, [edi]
-    and al, 80h                 ; Isolate piece's is_black bit
+    ; (ah already has game status's color bit from earlier)
+    mov al, [edi]               ; Get destination square info
+    and al, 80h                 ; Isolate is_black bit
     xor al, ah                  ; Check if the color is the same
     jnz DONT_CHECK_COLOR        ; If different, continue
 
-    mov FEEDBACK, MISMATCH_COLOR_DEST
+    SetFeedback MISMATCH_COLOR_CAPT
     jmp SKIP
 
     DONT_CHECK_COLOR:
-    call GetCoordsDifference    ; Get difference in coords. ax is normal, cx is abs value
+    call GetCoordsDifference    ; Get difference in coords. al(x) and ah(y) are normal, cl(x) and ch(y) are absolute value
     test bl, DIAGONAL
     jnz DIAGONAL_LOGIC
     DIAGONAL_RET:
@@ -305,11 +285,14 @@ InputToMove PROC
     jnz FORWARD_ONLY_LOGIC
     FORWARD_ONLY_RET:
 
-    mov FEEDBACK, INVALID_MOVE
+    SetFeedback INVALID_MOVE
     jmp SKIP
 
+
+    ;   DIAGONAL LOGIC   ;
+    ; To check if it's diagonal, we want to know if abs x == abs y
     DIAGONAL_LOGIC:
-    ; Check if it's diagonal
+
     cmp cl, ch                  ; Compare change in x with change in y
     jne DIAGONAL_RET            ; If not equal, go back and check other move types
 
@@ -319,11 +302,11 @@ InputToMove PROC
     jmp SKIP
     
 
-    PARALLEL_LOGIC:
-    ; To check if it's parallel, we want to know if one value is 0 and another is non 0
-    ; Since cx holds the absolute value of the coord differences,
-    ; I'm just gonna check if it's greater than 7, if not, rotate the bits and check again
+    ;   PARALLEL LOGIC   ;
+    ; To check if it's parallel, we want to know if either x or y is 0 and the other is non 0
+    ; I'm just gonna check if cx greater than 7, if not, rotate the bits and check again
     ; EX: 05 00h > 7 so rotate bits, now 00 05h <= 7
+    PARALLEL_LOGIC:
 
     cmp cx, 7
     jg FLIP             ; If cx > 7, go rotate bits
@@ -338,12 +321,14 @@ InputToMove PROC
     
     ror cx, 8           ; redo so non 0 is in cl (CheckPath needs this)
     IS_PARALLEL:
-    ; normalize vectors conditionally
-    call NormalizeVectorsConditional
+    ; normalize vectors al and ah
+    call NormalizeVectors
     call CheckPath      ; Check path
     jmp SKIP
 
 
+    ;   LSHAPE LOGIC   ;
+    ; To check if it's L-shaped, we want to know if x and y have a 2:1 ratio
     LSHAPE_LOGIC:
     ; I'm doing a similar trick to parallel
     cmp cx, 0201h
@@ -363,6 +348,9 @@ InputToMove PROC
     call CheckPath      ; Check path
     jmp SKIP
 
+
+    ;   FORWARD ONLY LOGIC   ;
+    ; To check if it's Forward Only, we want to know if y changes, but x is 0
     FORWARD_ONLY_LOGIC:
     ; Check for a single jump or a double jump
     test ch, 1
@@ -405,11 +393,6 @@ InputToMove PROC
     jnz FORWARD_ONLY_RET         ; If has moved already, go back and give feedback
 
     CHECK_DIRECTION:
-    ; xor table IS_BLACK bit
-    ; ah = 1, GS = 1 -> 0 (Moving up as white, Is black's turn) 
-    ; ah = 0, GS = 1 -> 1 (Moving up as black, Is black's turn)
-    ; ah = 1, GS = 0 -> 1 (Moving up as white, Is white's turn)
-    ; ah = 0, GS = 0 -> 0 (Moving up as black, Is white's turn)
     mov dh, ah              ; move ah to dh
     mov dl, GAME_STATUS
     and dl, 80h             ; Isolate game status's IS_BLACK_TURN bit
@@ -429,13 +412,11 @@ InputToMove PROC
     F_ONLY_CONTINUE:
     mov cl, ch              ; CheckPath uses cl as the loop condition, so put the forward jump distance into it
 
-    ; normalize vectors conditionally
-    call NormalizeVectorsConditional
+    ; normalize vectors
+    call NormalizeVectors
     call CheckPath
 
     SKIP:
-    pop ecx
-    pop edx
     cmp ecx, 0
     jne SKIP_POP_EDI
     pop edi
@@ -443,56 +424,8 @@ InputToMove PROC
     ret
 InputToMove ENDP
 
-NormalizeVectors PROC
-    sar al, 7
-    sar ah, 7
-    or al, 1
-    or ah, 1
-    ret
-NormalizeVectors ENDP
-
-NormalizeVectorsConditional PROC
-    test al, 0FFh
-    jz SKIP_X           ; If al = 0, skip
-
-    sar al, 7
-    or al, 1
-
-    SKIP_X:
-    test ah, 0FFh       ; If ah = 0, skip
-    jz SKIP_Y
-
-    sar ah, 7
-    or ah, 1
-
-    SKIP_Y:
-    ret
-NormalizeVectorsConditional ENDP
-
-; takes the coords in edx and return the difference
-; al is difference in x, cl is the absolute value
-; ah is difference in x, ch is the absolute value
-GetCoordsDifference PROC
-    mov al, dl      ; Get starting x
-    mov ah, dh      ; Get starting y
-    ror edx, 16     ; change dx to destination coords
-    sub al, dl      ; subtract x by destination x
-    mov cl, al
-    jg SKIP_FLIP_X  ; If result was greater than 0, skip negation
-    neg cl
-
-    SKIP_FLIP_X:
-    sub ah, dh      ; subtract y by destination y
-    mov ch, ah
-    jg SKIP_FLIP_Y  ; If result was greater than 0, skip negation
-    neg ch
-
-    SKIP_FLIP_Y:
-    ror edx, 16         ; change dx to back to source coords
-    ret
-GetCoordsDifference ENDP
-
-; esi starting position, edi ending position, ah y jump direction, al x jump direction, cl number of jumps, bh max number of jumps for piece type
+; Checks the path between source and destination to see if it's valid
+; Inputs: esi starting position, edi ending position, ah y jump direction, al x jump direction, cl number of jumps, bh max number of jumps for piece type
 CheckPath PROC
     ; Since we did x1-x2 and y1-y2 before, we have to invert the signs
     ; But since visually rows are in inverse position than they are in the array,
@@ -508,7 +441,7 @@ CheckPath PROC
     jmp LOOP_START      ; else skip feedback and continue
 
     MOVE_IS_INVALID:
-    mov FEEDBACK, INVALID_MOVE
+    SetFeedback INVALID_MOVE
     jmp SKIP
 
     LOOP_START:
@@ -526,7 +459,7 @@ CheckPath PROC
     test dl, 0Fh        
     jz LOOP_START               ; If not a piece, continue loop
 
-    mov FEEDBACK, BLOCKED_PATH  ; else set feedback and go back
+    SetFeedback BLOCKED_PATH    ; else set feedback and go back
     jmp SKIP
 
     AFTER_LOOP:
@@ -538,7 +471,7 @@ CheckPath PROC
     test dl, IS_EN_PASSANTABLE
     jnz SKIP                    ; If en passantable, continue (Don't bother checking for king, king will never be en passantable)
 
-    mov FEEDBACK, ERROR_PATH    ; else set feedback and go back
+    SetFeedback ERROR_PATH      ; else set feedback and go back
     jmp SKIP
 
     ; Check if king is trying to be captured
@@ -548,7 +481,7 @@ CheckPath PROC
     cmp al, KING
     jne SKIP                            ; If not trying to capture king, continue
 
-    mov FEEDBACK, ERROR_KING_CAPTURE    ; Else give feedback
+    SetFeedback ERROR_KING_CAPTURE      ; Else give feedback
 
     SKIP:
     pop esi
@@ -678,12 +611,12 @@ VerifyMove PROC
     mov [userInput], dl 
     mov [userInput+1], dh
     call InputToMove
-    mov cl, FEEDBACK
-    cmp cl, ERROR_KING_CAPTURE
+    GetFeedback
+    cmp al, ERROR_KING_CAPTURE
     je IS_ATTACKER
 
     SKIP_PIECE:
-    mov FEEDBACK, 0
+    SetFeedback 0
     dec dl
     jns CHECK_FOR_ATTACKER
     mov dl, 7
@@ -693,7 +626,7 @@ VerifyMove PROC
     jmp END_ATTACKER_SEARCH
 
     IS_ATTACKER:
-    mov FEEDBACK, KING_LEFT_IN_CHECK
+    SetFeedback KING_LEFT_IN_CHECK
     ; UNDO CHANGE
     mov esi, OFFSET CHESSBOARD
     mov edi, OFFSET CHESSBOARD_COPY
@@ -710,7 +643,7 @@ VerifyMove PROC
     jmp SKIP
 
     END_ATTACKER_SEARCH:
-    mov FEEDBACK, 0
+    SetFeedback 0
 
     SKIP:
     mov al, GAME_STATUS
@@ -719,35 +652,37 @@ VerifyMove PROC
     ret
 VerifyMove ENDP
 
+; Simply gets the input from user and puts it in userInput
 GetChessInput PROC
-    mGotoxy 17,20
+    mGotoxy 17,20               ; Move cursor after label "Enter your move: "
 
-    mov edx, OFFSET userInput
-    mov ecx, INPUT_SIZE
+    mov edx, OFFSET userInput   ; ReadString takes edx as address
+    mov ecx, INPUT_SIZE         ; ReadString takes ecx as the input size
     call ReadString
 
     ret
 GetChessInput ENDP
 
+; Gets input from userInput and converts the ascii characters to chessboard coords
 ProcessInput PROC
     ; Convert characters to decimal values
     ; Letter
-    mov al, [userInput]
+    mov al, [userInput]     ; First char
     sub al, 97              
     jl RANGE_ERROR          ; Check if it goes below 0
     mov [userInput], al
     ; Number
-    mov al, [userInput+1]
+    mov al, [userInput+1]   ; Second char
     sub al, 49
     jl RANGE_ERROR          ; Check if it goes below 0
     mov [userInput+1], al
     ; Letter
-    mov al, [userInput+2]
+    mov al, [userInput+2]   ; Third char
     sub al, 97
     jl RANGE_ERROR          ; Check if it goes below 0
     mov [userInput+2], al
     ; Number
-    mov al, [userInput+3]
+    mov al, [userInput+3]   ; Fourth char
     sub al, 49
     jl RANGE_ERROR          ; Check if it goes below 0
     mov [userInput+3], al
@@ -767,10 +702,10 @@ ProcessInput PROC
     cmp al, 7
     jg RANGE_ERROR
 
-    jmp SKIP
+    jmp SKIP    ; Everything checks out, we can continue
 
     RANGE_ERROR:
-    mov FEEDBACK, MOVE_OUTSIDE_RANGE
+    SetFeedback MOVE_OUTSIDE_RANGE
 
     SKIP:
     ret
@@ -827,7 +762,7 @@ MoveSPointerToSquare PROC
 
     movsx eax, dh               ; Copy row
 
-    ; Visually row 8 is actually the start of the array (If confused, look at chessboard from white's pov, then count left to right, up to down)
+    ; Visually row 8 is actually the start of the array (If confused, look at chessboard from white's pov, the array goes from left to right, top to bottom)
     ; so we have to invert the row number to get the row number in the array
     sub eax, 7
     neg eax
@@ -860,6 +795,7 @@ MoveDPointerToSquare PROC
     ret
 MoveDPointerToSquare ENDP
 
+; Simply prints a label saying whose turn it is
 PrintWhoseTurn PROC
     mov al, GAME_STATUS
     test al, IS_BLACK_TURN
@@ -878,147 +814,144 @@ PrintWhoseTurn PROC
     ret
 PrintWhoseTurn ENDP
 
+; Prints the chessboard
 PrintChessboard PROC
-    pushad
 
-    mGotoxy 0, 0
+    mov cl, 8                   ; cl: columns
+    mov ch, 8                   ; ch: rows
+    mov dl, 1                   ; dl: incrementer for row/column labels
+    mov ebx, 1                  ; ebx: incrementer for esi
 
-    ; Loop through Chessboard
-    mov cl, 8   ; columns
-    mov ch, 8   ; rows
-    mov dl, 1   ; incrementer for esi and row/column labels
-
-    mov al, GAME_STATUS
+    mov al, GAME_STATUS         ; Get whose turn
     test al, IS_BLACK_TURN
-    jnz PrintBlackTurn
+    jnz PrintBlackTurn          ; If black's turn, go to PrintBlackTurn
 
-    ; PrintWhiteTurn
-    mov esi, OFFSET CHESSBOARD
-    mov dh, 8   ; Row labels start at 8
-    neg dl      ; and count down
-    jmp RowStart
+    PrintWhiteTurn:
+        mov esi, OFFSET CHESSBOARD  ; Move source pointer to start of chessboard
+        mov dh, 8                   ; Row labels start at 8...
+        neg dl                      ; and count down
+        jmp RowStart
 
     PrintBlackTurn:
-    mov esi, OFFSET CHESSBOARD+63
-    mov dh, 1   ; Row labels start at 1 and count up
-
+        mov esi, OFFSET CHESSBOARD+63   ; Move source pointer to end of chessboard
+        mov dh, 1                       ; Row labels start at 1 and count up
+        neg ebx                         ; but esi counts down
 
     ; print the row number
     RowStart:
-    mov eax, white + (black*16) ; Set Text color to white
-    call SetTextColor
-    movzx eax, dh               ; Print Row Number
-    call WriteDec
-    mWrite <"   ">
+        mov eax, white + (black*16) ; Set Text color to white
+        call SetTextColor
+        movzx eax, dh               
+        call WriteDec               ; Print Row Label
+        mWrite <"   ">
 
     PieceStart:
-    call PrintPiece
+        call PrintPiece             ; Print piece
 
-    movsx ebx, dl
-    neg ebx
-    add esi, ebx
-    dec cl
-    jnz PieceStart
-    call crlf
-    call crlf
-    mov cl, 8
-    add dh, dl
-    dec ch
-    jnz RowStart
+        add esi, ebx                ; increment ebx
+        dec cl                      ; decrement column counter
+        jnz PieceStart              ; If cl != 0, continue printing pieces
+        call crlf
+        call crlf
+        mov cl, 8                   ; reset column counter
+        add dh, dl                  ; increment row label
+        dec ch                      ; decrement row counter
+        jnz RowStart                ; if ch != 0, continue printing rows
 
-    ; Reset Text Color
+    ; Set Text color to white
     mov eax, white + (black*16)
     call SetTextColor
 
     ; Print the column labels
-    neg dl
-    add dh, dl          ; Undo the last add at the end of the previous loop
-    mov cl, 8
-    mov al, dh          ; White's view, dh = 0. Black's view, dh = 8
-    add al, 96          ; 'a' - 1
-    mWrite <"x   ">
+    neg dl                  ; Flip label incrementer...
+    add dh, dl              ; and undo the last add (this is important)
+    mov cl, 8               ; reset column counter
+
+    mov al, dh              ; White's view: dh = 1. Black's view: dh = 8 (without the undo, it would be 0 and 9)
+    add al, 96              ; 'a' - 1
+
+    mWrite <"x   ">         ; Print corner
+
     ColumnLabel:
-    call WriteChar
-    mWrite <"   ">
-    add al, dl
-    dec cl
-    jnz ColumnLabel
+        call WriteChar      ; Print column label
+        mWrite <"   ">
+        add al, dl          ; increment column label
+        dec cl              ; decrement column counter
+        jnz ColumnLabel     ; if c != 0, continue printing labels
 
     call crlf
     call crlf
 
-    popad
     ret
 PrintChessboard ENDP
 
-PrintPiece PROC
-    push edx
+; Gets character from esi and prints it
+PrintPiece PROC uses edx    ; edx is used in PrintChessboard for nonvolitile temp information
+
+    mov al, BYTE PTR [esi]  ; Get piece
+    and al, 0Fh             ; Isolate type
 
     ; Check which piece type is on the square
-    mov al, BYTE PTR [esi]
-    and al, PAWN
     cmp al, PAWN
     je PrintPawn            ; If Pawn
-    mov al, BYTE PTR [esi]
-    and al, ROOK
+
     cmp al, ROOK
     je PrintRook            ; If Rook
-    mov al, BYTE PTR [esi]
-    and al, KNIGHT
+
     cmp al, KNIGHT
     je PrintKnight          ; If Knight
-    mov al, BYTE PTR [esi]
-    and al, BISHOP
+
     cmp al, BISHOP
     je PrintBishop          ; If Bishop
-    mov al, BYTE PTR [esi]
-    and al, QUEEN
+
     cmp al, QUEEN
     je PrintQueen           ; If Queen
-    mov al, BYTE PTR [esi]
-    and al, KING
+
     cmp al, KING
     je PrintKing            ; If King
 
-    mov dl, SYM_BLANK
-    jmp ColorDefault        ; Else
+    jmp PrintBlank          ; Else
 
     ; Save character to DL
     PrintPawn:
-    mov dl, SYM_PAWN
-    jmp PrintP
+        mov dl, SYM_PAWN
+        jmp CheckColor
     PrintRook:
-    mov dl, SYM_ROOK
-    jmp PrintP
+        mov dl, SYM_ROOK
+        jmp CheckColor
     PrintKnight:
-    mov dl, SYM_KNIGHT
-    jmp PrintP
+        mov dl, SYM_KNIGHT
+        jmp CheckColor
     PrintBishop:
-    mov dl, SYM_BISHOP
-    jmp PrintP
+        mov dl, SYM_BISHOP
+        jmp CheckColor
     PrintQueen:
-    mov dl, SYM_QUEEN
-    jmp PrintP
+        mov dl, SYM_QUEEN
+        jmp CheckColor
     PrintKing:
-    mov dl, SYM_KING
-
-    PrintP:
+        mov dl, SYM_KING
+        jmp CheckColor
+    PrintBlank:
+        mov dl, SYM_BLANK
+        jmp ColorDefault    ; Skip the color check
+        
     ; Check the color of square
-    mov al, BYTE PTR [esi]
-    and al, 10000000b
-    cmp al, IS_BLACK
-    je ColorChangeToBlack
-    jne ColorChangeToWhite
+    CheckColor:
+        mov al, BYTE PTR [esi]      ; Get piece
+        and al, IS_BLACK            ; Isolate color
+        cmp al, IS_BLACK
+        je ColorChangeToBlack
+        jne ColorChangeToWhite
 
     ; Set Color
     ColorChangeToWhite:
-    mov eax, yellow + (black*16)
+    mov eax, yellow + (black*16)    ; White is represented with yellow
     jmp SetPrintColor
     ColorChangeToBlack:
-    mov eax, red + (black*16)
+    mov eax, red + (black*16)       ; Black is represented with red
     jmp SetPrintColor
     ColorDefault:
-    mov eax, white + (black*16)
+    mov eax, white + (black*16)     ; Blank squares are represented with white
 
     SetPrintColor:
     call SetTextColor
@@ -1028,130 +961,9 @@ PrintPiece PROC
     call WriteChar
     mWrite <"   ">
 
-    pop edx
     ret
 PrintPiece ENDP
 
-PrintFeedback PROC
-
-    ; Set Text color to red
-    mov eax, red + (black*16)
-    call SetTextColor
-
-    mov al, FEEDBACK
-    test al, 0FFh
-    jz END_OF_FEEDBACK
-
-    cmp al, INVALID_MOVE
-    je INVALID_MOVE_F
-
-    cmp al, MISMATCH_COLOR
-    je MISMATCH_COLOR_F
-
-    cmp al, MISMATCH_COLOR_DEST
-    je MISMATCH_COLOR_DEST_F
-
-    cmp al, MOVE_OUTSIDE_RANGE
-    je OUTSIDE_RANGE
-
-    cmp al, BLOCKED_PATH
-    je BLOCKED_PATH_F
-
-    cmp al, KING_LEFT_IN_CHECK
-    je KING_IN_CHECK
-
-    cmp al, EMPTY_SQUARE_MOVE
-    je E_SQUARE
-
-    cmp al, ERROR_PATH
-    je ERROR_PATH_F
-
-    cmp al, ERROR_KING_CAPTURE
-    je ERROR_KING_CAPTURE_F
-    
-    jmp END_OF_FEEDBACK
-
-    INVALID_MOVE_F:
-    mWriteln <"Invalid Move!">
-    jmp END_OF_FEEDBACK
-
-    MISMATCH_COLOR_F:
-    mWriteLn <"Can't move piece that's not yours!">
-    jmp END_OF_FEEDBACK
-
-    MISMATCH_COLOR_DEST_F:
-    mWriteLn <"You already occupying the end square!">
-    jmp END_OF_FEEDBACK
-
-    OUTSIDE_RANGE:
-    mWriteln <"Invalid Syntax / Outside Range!">
-    jmp END_OF_FEEDBACK
-
-    KING_IN_CHECK:
-    mWriteln <"Your king is left in check! ">
-    jmp END_OF_FEEDBACK
-
-    E_SQUARE:
-    mWriteln <"Starting square is empty!">
-    jmp END_OF_FEEDBACK
-
-    BLOCKED_PATH_F:
-    mWriteln <"Path between start and end is blocked by a piece!">
-    jmp END_OF_FEEDBACK
-
-    ERROR_KING_CAPTURE_F:
-    mWriteln <"You should never be able to capture the king. That's a bug">
-    jmp END_OF_FEEDBACK
-
-    ERROR_PATH_F:
-    mWriteln <"A bug occurred when checking the path between pieces">
-
-
-    END_OF_FEEDBACK:
-    mov eax, white + (black*16)
-    call SetTextColor
-    mov FEEDBACK, 0
-    ret
-PrintFeedback ENDP
-
-
-; HELPER PROCEDURES
-
-; Written by Malcolm McCullough
-; Modified by Matthew Marquez
-; takes al
-; sets carry flag 
-;  if  AL  is 'y' or 'Y'
-; sets zero flag
-;  if  AL  is 'n' or 'N'
-YesOrNo PROC uses eax ebx ecx edx esi edi
-    START:
-
-    cmp al, 'y'
-    je SETCARRY
-    cmp al, 'Y'
-    je SETCARRY
-
-    cmp al, 'n'
-    je SETZERO
-    cmp al, 'N'
-    je SETZERO
-    
-    or al,1     ; clear zero flag
-    clc         ; clear carry flag
-    jmp SKIP
-
-    SETZERO:
-    test al,0   ; set zero flag
-    clc         ; clear carry flag
-    jmp SKIP
-
-    SETCARRY:
-    stc         ; set carry flag
-
-    SKIP:
-    ret 
-YesorNo ENDP
 
 
 END main

@@ -1,0 +1,2 @@
+C:\Users\matth\Documents\Programming Projects\Project32_VS2022\Debug\Project.exe
+C:\Users\matth\Documents\Programming Projects\TerminalChess\Debug\Project.exe
