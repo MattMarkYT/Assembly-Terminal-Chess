@@ -1,7 +1,79 @@
 INCLUDE Irvine32.inc
 INCLUDE SmallHelpers.inc
 
+KING            EQU 01h
+IS_BLACK_TURN   EQU 10000000b
+
 .code
+
+; Takes chess input in dx (dh is row, dl is column), esi starting address of chessboard
+; and sets esi to the square
+MoveSPointerToSquare PROC uses eax
+    movsx eax, dh               ; Copy row
+
+    ; Visually row 8 is actually the start of the array (If confused, look at chessboard from white's pov, the array goes from left to right, top to bottom)
+    ; so we have to invert the row label to get the row number in the array
+    sub eax, 7
+    neg eax
+    shl eax, 3                  ; multiply row by 2^3
+    add al, dl                  ; add column
+
+    add esi, eax                ; Go to square
+
+    ret
+MoveSPointerToSquare ENDP
+
+; Takes chess input in dx (dh is row, dl is column), edi starting address of chessboard
+; and sets edi to the square
+MoveDPointerToSquare PROC uses eax
+    movsx eax, dh               ; Copy row
+
+    ; Refer to MoveSPointerToSquare just above this Procedure
+    sub eax, 7
+    neg eax
+    shl eax, 3                  ; multiply row by 2^3 = 8
+    add al, dl                  ; add column
+
+    add edi, eax                ; Go to square
+
+    ret
+MoveDPointerToSquare ENDP
+
+; Takes esi starting address of chessboard, ah as GAME_STATUS's IS_BLACK_TURN bit
+; and sets dx to king square coords depending on GAME_STATUS
+; dl: column, dh: row
+MoveDXToKing PROC
+
+    mov dl, 0
+    mov dh, 7
+    START:
+    mov al, [esi]
+    and al, 0Fh
+    cmp al, KING
+    je IS_KING
+
+    jmp SKIP
+
+    IS_KING:
+    mov al, [esi]
+    and al, IS_BLACK_TURN
+    cmp al, ah
+    jne SKIP
+
+    jmp END_SEARCH
+    
+    SKIP:
+    inc esi
+    inc dl
+    cmp dl, 8
+    jl START
+    mov dl, 0
+    dec dh
+    jmp START
+
+    END_SEARCH:
+    ret
+MoveDXToKing ENDP
 
 ; Takes in al(x) and ah(y) and normalizes them
 ; Turns to 1 if positive, -1 if negative, 0 if zero
@@ -20,6 +92,7 @@ NormalizeVectors PROC
         or ah, 1
 
     SKIP_Y:
+    ret
 NormalizeVectors ENDP
 
 ; Written by Malcolm McCullough

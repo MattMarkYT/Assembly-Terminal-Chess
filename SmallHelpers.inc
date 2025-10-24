@@ -2,6 +2,19 @@ COMMENT !
 
 List of Procedures:
 
+MoveSPointerToSquare PROTO
+	-- Takes chess input in dx (dh is row, dl is column), esi starting address of chessboard
+	-- and sets esi to the square
+
+MoveDPointerToSquare PROTO
+	-- Takes chess input in dx (dh is row, dl is column), edi starting address of chessboard
+	-- and sets edi to the square
+
+MoveDXToKing PROTO
+	-- Takes esi starting address of chessboard, ah as GAME_STATUS's IS_BLACK_TURN bit
+	-- and sets dx to king square coords depending on GAME_STATUS
+	-- dl: column, dh: row
+
 YesOrNo PROTO
 	-- Takes character in al and checks if it's y or n
 	-- sets carry flag if al is 'y' or 'Y'
@@ -19,6 +32,9 @@ GetCoordsDifference PROTO
 
 END COMMENT !
 
+MoveSPointerToSquare PROTO
+MoveDPointerToSquare PROTO
+MoveDXToKing PROTO
 YesOrNo PROTO
 NormalizeVectors PROTO
 GetCoordsDifference PROTO
