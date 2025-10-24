@@ -7,6 +7,7 @@ To Do:
 - Proper Resignation/Quit
 - Stalemate conditions (King has no valid moves, insufficient material)
 - Castling
+- Refactoring for readability
 
 Optionally:
 - Save games for later
