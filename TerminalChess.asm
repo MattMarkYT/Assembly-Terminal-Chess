@@ -647,9 +647,6 @@ CheckForSquareDefender PROC uses edx eax
     IS_ATTACKER:
     SetFeedback 1
     SKIP:
-    mov al, GAME_STATUS
-    xor al, IS_BLACK
-    mov GAME_STATUS, al
     ret
 CheckForSquareDefender ENDP
 
@@ -662,6 +659,9 @@ CheckForSquareAttacker PROC uses ax
     xor al, IS_BLACK
     mov GAME_STATUS, al
     call CheckForSquareDefender
+    mov al, GAME_STATUS
+    xor al, IS_BLACK
+    mov GAME_STATUS, al
     ret
 CheckForSquareAttacker ENDP
 
