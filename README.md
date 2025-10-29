@@ -4,7 +4,6 @@ Chess written in x86 MASM Assembly
 As of October 23, 2025, it is fully playable from start to checkmate
 
 To Do:
-- Proper Resignation/Quit
 - Stalemate conditions (King has no valid moves, insufficient material)
 - Castling
 - Refactoring for readability
