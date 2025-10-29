@@ -65,6 +65,8 @@ IS_BLACK_TURN   EQU 10000000b
 
 .data
 
+    resign_str BYTE "resi",0
+    exit_str BYTE "exit",0
     chess_title BYTE "Terminal Chess",0
     userInput BYTE INPUT_SIZE DUP(0)
 
@@ -88,6 +90,7 @@ main PROC
     invoke SetConsoleTitle, OFFSET chess_title
     PLAY_AGAIN:
     call chess
+    je QUIT_GAME
 
     INVALID_MENU:
     mwriteln<"Do you want to play again? [y/n]:  ">
@@ -112,6 +115,16 @@ chess PROC
     
     ; Initialize Chessboard
     call initChessboard
+    ; Clear registers
+    mov eax, 0
+    mov ebx, 0
+    mov ecx, 0
+    mov edx, 0
+    mov esi, 0
+    mov edi, 0
+    ; Reset data
+    mov [GAME_STATUS], 0
+    mov [FIFTY_MOVE_RULE], 0
 
     StartTurn:
         call Clrscr             ; Clear Screen
@@ -134,6 +147,11 @@ chess PROC
         mov edi, 0
         call GetChessInput  ; Ask the player for input
 
+        Invoke Str_compare, ADDR userInput, ADDR exit_str 
+        je EXIT_L
+        Invoke Str_compare, ADDR userInput, ADDR resign_str
+        je RESIGN
+
         call ProcessInput   ; Turns ascii input in userInput into coords ranging from 0-7
 
         call InputToMove    ; Check if move from source to destination is valid
@@ -155,8 +173,19 @@ chess PROC
 
     jmp StartTurn           ; Loop back if game not over
     
+    RESIGN:
+    ; Switch turn
+    mov al, GAME_STATUS
+    xor al, IS_BLACK
+    mov GAME_STATUS, al
+    ; Gameover
+    mov al, GAME_STATUS
+    or al, GAMEOVER
+    mov GAME_STATUS, al
     WIN:
     call PrintWinner
+    ret
+    EXIT_L:
     ret
 chess ENDP
 
@@ -794,6 +823,15 @@ ProcessInput PROC
 ProcessInput ENDP
 
 InitChessboard PROC
+    ; Clear board
+    mov cl, 64
+    mov esi, OFFSET [CHESSBOARD]
+
+    PlaceBlanks:
+    mov BYTE PTR [esi], 0
+    inc esi
+    dec cl
+    jnz PlaceBlanks
 
     ; BLACK
     mov [CHESSBOARD+0], BLACK_ROOK
