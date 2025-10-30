@@ -126,6 +126,10 @@ chess PROC
     mov [GAME_STATUS], 0
     mov [FIFTY_MOVE_RULE], 0
 
+    jmp StartTurn
+        
+    StartTurnError:
+        pop edi                 ; If invalid move, we want to load last moved piece
     StartTurn:
         call Clrscr             ; Clear Screen
         call PrintChessboard    ; Print Chessboard
@@ -138,6 +142,7 @@ chess PROC
         PrintFeedback           ; Print feedback if any
     
     GET_INPUT:
+        push edi                ; Save last moved piece (This is the last light blue piece)
         ; Clear registers
         mov eax, 0
         mov ebx, 0
@@ -147,9 +152,9 @@ chess PROC
         mov edi, 0
         call GetChessInput  ; Ask the player for input
 
-        Invoke Str_compare, ADDR userInput, ADDR exit_str 
+        Invoke Str_compare, OFFSET userInput, OFFSET exit_str 
         je EXIT_L
-        Invoke Str_compare, ADDR userInput, ADDR resign_str
+        Invoke Str_compare, OFFSET userInput, OFFSET resign_str
         je RESIGN
 
         call ProcessInput   ; Turns ascii input in userInput into coords ranging from 0-7
@@ -157,23 +162,26 @@ chess PROC
         call InputToMove    ; Check if move from source to destination is valid
         GetFeedback         ; move FEEDBACK Byte into al
         cmp al, 0
-        jne StartTurn       ; If FEEDBACK != 0, restart turn
+        jne StartTurnError  ; If FEEDBACK != 0, restart turn
 
         call VerifyMove     ; Second round of input validation (Leaving king in check, etc)
         GetFeedback         ; move FEEDBACK Byte into al
         cmp al, 0
-        jne StartTurn       ; If FEEDBACK != 0, restart turn
+        jne StartTurnError  ; If FEEDBACK != 0, restart turn
 
     ; Switch turn
     mov al, GAME_STATUS
     xor al, IS_BLACK
     mov GAME_STATUS, al
 
+    add esp, 4              ; If valid move, we clear last moved piece from stack
+
     call CheckmateCondition
 
     jmp StartTurn           ; Loop back if game not over
     
     RESIGN:
+    add esp, 4              ; Clear last moved piece from stack
     ; Switch turn
     mov al, GAME_STATUS
     xor al, IS_BLACK
@@ -186,9 +194,12 @@ chess PROC
     call PrintWinner
     ret
     EXIT_L:
+    add esp, 4              ; Clear last moved piece from stack
+    test al, 0              ; Set Zero flag
     ret
 chess ENDP
 
+; 
 CheckmateCondition PROC
     push [edi]
     push edi
@@ -262,6 +273,7 @@ InputToMove PROC uses edx ecx ebx
     ja OUTSIDE_RANGE
     cmp bh, 7
     ja OUTSIDE_RANGE
+    cmp dl, 7
     cmp dl, 7
     ja OUTSIDE_RANGE
     cmp dh, 7
@@ -1019,6 +1031,8 @@ PrintPiece PROC uses edx    ; edx is used in PrintChessboard for nonvolitile tem
         
     ; Check the color of square
     CheckColor:
+        cmp esi, edi
+        je ColorChangeToRecentPiece
         mov al, BYTE PTR [esi]      ; Get piece
         and al, IS_BLACK            ; Isolate color
         cmp al, IS_BLACK
@@ -1027,13 +1041,16 @@ PrintPiece PROC uses edx    ; edx is used in PrintChessboard for nonvolitile tem
 
     ; Set Color
     ColorChangeToWhite:
-    mov eax, yellow + (black*16)    ; White is represented with yellow
-    jmp SetPrintColor
+        mov eax, yellow + (black*16)        ; White is represented with yellow
+        jmp SetPrintColor
     ColorChangeToBlack:
-    mov eax, red + (black*16)       ; Black is represented with red
-    jmp SetPrintColor
+        mov eax, red + (black*16)           ; Black is represented with red
+        jmp SetPrintColor
+    ColorChangeToRecentPiece:
+        mov eax, lightBlue + (black*16)     ; Recent piece is represented with light blue
+        jmp SetPrintColor
     ColorDefault:
-    mov eax, white + (black*16)     ; Blank squares are represented with white
+        mov eax, white + (black*16)         ; Blank squares are represented with white
 
     SetPrintColor:
     call SetTextColor
@@ -1078,7 +1095,7 @@ CopyChessboard PROC uses esi edi cx
     ret
 CopyChessboard ENDP
 
-UndoCopyChessboard PROC
+UndoCopyChessboard PROC uses esi edi
     mov esi, OFFSET CHESSBOARD
     mov edi, OFFSET CHESSBOARD_COPY
 
