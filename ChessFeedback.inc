@@ -137,6 +137,5 @@ PrintFeedback MACRO
     SKIP_PRINT:
     mov eax, white + (black*16)     ; Set text color back to white
     call SetTextColor
-    mov FEEDBACK, 0                 ; Once printed, clear FEEDBACK
 
 ENDM

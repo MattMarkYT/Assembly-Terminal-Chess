@@ -60,6 +60,7 @@ BLACK_PAWN      EQU 86h
 ; Game Status Flags
 GAMEOVER        EQU 00000001b
 STALEMATE       EQU 00000010b
+CHECKMATE       EQU 00000100b
 IS_BLACK_TURN   EQU 10000000b
 
 
@@ -81,7 +82,7 @@ IS_BLACK_TURN   EQU 10000000b
     GAME_STATUS BYTE 0
     FIFTY_MOVE_RULE BYTE 0
 
-    CHESSBOARD          BYTE 64 DUP(0)
+    CHESSBOARD          BYTE 64 DUP (0)
     CHESSBOARD_COPY     BYTE 64 DUP (0)
 
 .code
@@ -114,14 +115,16 @@ main ENDP
 chess PROC
     
     ; Initialize Chessboard
-    call initChessboard
+        call initChessboard
+    ; Clear Feedback
+        SetFeedback 0
     ; Clear registers
-    mov eax, 0
-    mov ebx, 0
-    mov ecx, 0
-    mov edx, 0
-    mov esi, 0
-    mov edi, 0
+        mov eax, 0
+        mov ebx, 0
+        mov ecx, 0
+        mov edx, 0
+        mov esi, 0
+        mov edi, OFFSET CHESSBOARD_COPY     ; Just so the first push at GetInput doesn't give an error
     ; Reset data
     mov [GAME_STATUS], 0
     mov [FIFTY_MOVE_RULE], 0
@@ -129,20 +132,23 @@ chess PROC
     jmp StartTurn
         
     StartTurnError:
-        pop edi                 ; If invalid move, we want to load last moved piece
+    ; If invalid move, we want to load last moved piece
+        pop edi                 ; address
+        pop ax                  ; then value
+        mov [edi], al
     StartTurn:
         call Clrscr             ; Clear Screen
         call PrintChessboard    ; Print Chessboard
         
-        mov al, GAME_STATUS
-        test al, GAMEOVER
-        jnz WIN
-
         call PrintWhoseTurn     ; Print the "Enter your move" label
         PrintFeedback           ; Print feedback if any
     
-    GET_INPUT:
-        push edi                ; Save last moved piece (This is the last light blue piece)
+    GetInput:
+        mov al, [edi]           ; Save last moved piece (This is the last light blue piece)
+        push ax                 ; value
+        push edi                ; then address
+        ; Clear Feedback
+        SetFeedback 0
         ; Clear registers
         mov eax, 0
         mov ebx, 0
@@ -150,59 +156,100 @@ chess PROC
         mov edx, 0
         mov esi, 0
         mov edi, 0
-        call GetChessInput  ; Ask the player for input
+        call GetChessInput      ; Ask the player for input
 
         Invoke Str_compare, OFFSET userInput, OFFSET exit_str 
         je EXIT_L
         Invoke Str_compare, OFFSET userInput, OFFSET resign_str
-        je RESIGN
+        je IS_RESIGN
 
-        call ProcessInput   ; Turns ascii input in userInput into coords ranging from 0-7
-
-        call InputToMove    ; Check if move from source to destination is valid
-        GetFeedback         ; move FEEDBACK Byte into al
+        call ProcessInput       ; Turns ascii input in userInput into coords ranging from 0-7
+        GetFeedback
         cmp al, 0
-        jne StartTurnError  ; If FEEDBACK != 0, restart turn
+        jne StartTurnError      ; If FEEDBACK != 0, restart turn
 
-        call VerifyMove     ; Second round of input validation (Leaving king in check, etc)
-        GetFeedback         ; move FEEDBACK Byte into al
+    InputValidation:
+        call PreMoveValidation  ; Lots of small checks for pre move validation
+        GetFeedback
         cmp al, 0
-        jne StartTurnError  ; If FEEDBACK != 0, restart turn
+        jne StartTurnError      ; If FEEDBACK != 0, restart turn
+
+        call InMoveValidation   ; Check if pathing is valid
+        GetFeedback
+        cmp al, 0
+        jne StartTurnError      ; If FEEDBACK != 0, restart turn
+
+        call PostMoveValidation ; On a copy, do the move and test if king is in check
+        GetFeedback             ; move FEEDBACK Byte into al
+        cmp al, 0
+        jne StartTurnError      ; If FEEDBACK != 0, restart turn
+
+    ; Input is valid
+    call PawnPromotion          ; Check if Pawn Promotion is in play
 
     ; Switch turn
     mov al, GAME_STATUS
-    xor al, IS_BLACK
+    xor al, IS_BLACK_TURN
     mov GAME_STATUS, al
 
-    add esp, 4              ; If valid move, we clear last moved piece from stack
+    add esp, 6                  ; We clear last moved piece from stack since current move is valid
 
+    mov al, [edi]
     call CheckmateCondition
+    mov [edi], al
 
-    jmp StartTurn           ; Loop back if game not over
+    mov al, GAME_STATUS
+    test al, GAMEOVER
+    jnz GAME_IS_OVER
+
+    call StalemateCondition
+
+    GetFeedback
+    cmp al, 0
+    jne GAME_IS_OVER
+
+    jmp StartTurn               ; Loop back
     
-    RESIGN:
-    add esp, 4              ; Clear last moved piece from stack
-    ; Switch turn
-    mov al, GAME_STATUS
-    xor al, IS_BLACK
-    mov GAME_STATUS, al
+
+    IS_RESIGN:
     ; Gameover
+        add esp, 6              ; Clear last moved piece from stack
+        mov al, GAME_STATUS
+        or al, GAMEOVER
+        or al, CHECKMATE
+        mov GAME_STATUS, al
+    GAME_IS_OVER:
+    call Clrscr                 ; Clear Screen
+    call PrintChessboard        ; Print Chessboard
+
     mov al, GAME_STATUS
-    or al, GAMEOVER
-    mov GAME_STATUS, al
-    WIN:
-    call PrintWinner
+
+    test al, CHECKMATE
+    jnz IS_CHECKMATE
+
+    test al, STALEMATE
+    jnz IS_STALEMATE
+
+    jmp UNKNOWN_ERROR
+
+    IS_CHECKMATE:
+        call PrintWinner
+    ret
+
+    IS_STALEMATE:
+        call PrintStalemate
+    ret
+    UNKNOWN_ERROR:
+        mWriteln "Game ended wrongly. This is a bug."
     ret
     EXIT_L:
-    add esp, 4              ; Clear last moved piece from stack
-    test al, 0              ; Set Zero flag
+        add esp, 6              ; Clear last moved piece from stack
+        test al, 0              ; Set Zero flag
     ret
 chess ENDP
 
 ; 
-CheckmateCondition PROC
-    push [edi]
-    push edi
+CheckmateCondition PROC uses edi ax
     mov esi, OFFSET CHESSBOARD
     mov ah, GAME_STATUS
     and ah, IS_BLACK_TURN
@@ -215,7 +262,7 @@ CheckmateCondition PROC
 
     call CheckForSquareAttackers
     cmp cl, 1
-    jg CHECKMATE                ; If king can't move and checked by > one piece, it is checkmate
+    jg IS_CHECKMATE             ; If king can't move and checked by > one piece, it is checkmate
     jl SKIP                     ; If checked by no piece, not checkmate
 
     ; else if checked by one piece
@@ -238,65 +285,210 @@ CheckmateCondition PROC
     call CheckPathForDefenders
     GetFeedback
     cmp al, 0
-    je CHECKMATE
+    je IS_CHECKMATE
 
     jmp SKIP
 
-    CHECKMATE:
-    mov al, GAME_STATUS
-    or al, GAMEOVER
-    mov GAME_STATUS, al
+    IS_CHECKMATE:
+        mov al, GAME_STATUS
+        or al, GAMEOVER
+        or al, CHECKMATE
+        mov GAME_STATUS, al
     SKIP:
-    pop edi
-    pop [edi]
+        SetFeedback 0
     ret
 CheckmateCondition ENDP
 
-; Used in checking a move is valid
-InputToMove PROC uses edx ecx ebx
+; Checks if
+; Output: Feedback (0 if not stalemate, else is stalemate)
+StalemateCondition PROC uses edi
+    ; Set coords and pointer to start of array
+    mov dl, 0
+    mov dh, 7
+    mov esi, OFFSET CHESSBOARD
+
+    ; Prepare ah with whose turn it is
+    mov ah, GAME_STATUS         ; Get Game Status
+    and ah, IS_BLACK_TURN       ; Isolate game status's is_black_turn bit
+
+    ; Search through array, simulate all moves for pieces current player owns
+    SEARCH_FOR_P:
+    mov al, [esi]               ; Get square info
+    cmp al, 0
+    je SKIP_PIECE               ; If square == 0 (empty), skip this piece
+    and al, IS_BLACK            ; Isolate piece's is_black bit
+    xor al, ah                  ; Check if player owns piece
+    jnz SKIP_PIECE              ; If different color, skip this piece
+
+    CHECK_MOVES:
+    call SimulateAllMoves
+    GetFeedback
+    cmp al, 0
+    je SKIP                     ; If valid move, end loop
+
+    SKIP_PIECE:
+    inc esi
+    inc dl                      ; Look at next column
+    cmp dl, 8
+    jl SEARCH_FOR_P             ; If column < 8, go back
+    mov dl, 0                   ; reset column to 0
+    dec dh                      ; Look at next row
+    jns SEARCH_FOR_P            ; If row >= 0, go back
+    
+        SetFeedback 1
+        mov al, GAME_STATUS
+        or al, GAMEOVER
+        or al, STALEMATE
+        mov GAME_STATUS, al
+
+    SKIP:
+    ret
+StalemateCondition ENDP
+
+; Input: esi (moving piece), dx (piece coordinates)
+; Output: Feedback (0 for valid move, else for invalid)
+SimulateAllMoves PROC uses edi ax
+    call GetPieceLogic
+    ; Check all of the piece's move abilities to check for valid moves
+    test bl, DIAGONAL
+    jz NOT_DIAGONAL
+        mov ch, 4
+        mov eax, 0FFFF0101h ; x1y1 then x1y-1 then x-1y-1 then x-1y1
+        call SimulateMoves
+        GetFeedback
+        cmp al, 0
+        je SKIP
+    NOT_DIAGONAL:
+
+    test bl, PARALLEL
+    jz NOT_PARALLEL
+        mov ch, 4
+        mov eax, 00FF0001h  ; x1y0 then x0y-1 then x-1y0 then x0y1
+        call SimulateMoves
+        GetFeedback
+        cmp al, 0
+        je SKIP
+    NOT_PARALLEL:
+
+    test bl, LSHAPE
+    jz NOT_LSHAPE           ; (I drew a diagram to brainstorm this one)
+        ; First 4 moves 
+        mov ch, 4
+        mov eax, 0FE010201h ; x1y2 then x2y1 then x1y-2 then x-2y1
+        call SimulateMoves
+        GetFeedback
+        cmp al, 0
+        je SKIP
+        ; Last 4 moves
+        mov ch, 4
+        mov eax, 0FEFF02FFh ; x-1y2 then x2y-1 then x-1y-2 then x-2y-1
+        call SimulateMoves
+        GetFeedback
+        cmp al, 0
+        je SKIP
+    NOT_LSHAPE:
+
+    test bl, FORWARD_ONLY
+    jz NOT_FORWARD_ONLY
+        ; First 2 moves
+        mov ch, 2
+        mov eax, 010100h
+        call SimulateMoves
+        GetFeedback
+        cmp al, 0
+        je SKIP
+        ; Last move
+        mov ch, 1
+        mov eax, 01FFh
+        call SimulateMoves
+        GetFeedback
+        cmp al, 0
+        je SKIP
+    NOT_FORWARD_ONLY:
+
+    SetFeedback 1           ; If none were valid, set feedback
+
+    SKIP:
+    ret
+SimulateAllMoves ENDP
+
+; Simulates 4 moves by looking at bx then rotating ebx by a byte
+; Input: ebx (The moves to do), ch (How many moves to do. Recommended 1-4), 
+;        esi (Moving piece), dx (coords of moving piece)
+; Output: Feedback (0 if valid move, else if invalid)
+SimulateMoves PROC uses esi eax ebx ecx edx
+
+    SIM_START:
+        mov bx, dx                  ; Make copy of source square
+        ror edx, 16                 ; stash it
+        mov dx, bx                  ; paste copy in destination
+        add dx, ax                  ; Add move coords to destination
+        test dx, 0F8F8h             ; Check if dl and dh are between 0 and 7 inclusive
+
+        ror edx, 16                 ; Switch back to source
+        jnz SKIP_SIM                ; If not in range, skip
+
+        call PreMoveValidation
+        mov bl, al
+        GetFeedback
+        cmp al, 0
+        mov al, bl
+        jne SKIP_SIM
+
+        call InMoveValidation
+        mov bl, al
+        GetFeedback
+        cmp al, 0
+        mov al, bl
+        jne SKIP_SIM                ; If there is feedback (!= 0), invalid move
+
+        call PostMoveValidation
+        mov bl, al
+        GetFeedback
+        cmp al, 0
+        mov al, bl
+        jne SKIP_SIM                ; If there is feedback (!= 0), invalid move
+
+    ; Valid Move
+    call UndoCopyChessboard
+    jmp SKIP
+
+    SKIP_SIM:
+        ror eax, 8
+        dec ch
+    jnz SIM_START
+
+    SetFeedback 1           ; If none were valid, set feedback
+
+    SKIP:        
+    ret
+SimulateMoves ENDP
+
+; A series of premove validations
+; Input: edx (Position in this order: y2x2y1x1)
+; Output: Feedback (0 if valid move, else if invalid), esi (source square), edi (destination square)
+PreMoveValidation PROC uses edx ecx ebx eax
     SetFeedback 0
-    ; Get First Piece
-    mov edx, DWORD PTR [userInput]      ; Copies userInput (a2c4[0123] in memory -> 4c2a[3210] in edx)
 
     ; Check if source and destination coords are the same
     mov bx, dx                      ; Copy source coords to bx
     ror edx, 16                     ; Temp switch dx to the destination coords
     cmp bx, dx
-    jne NotSameSquare               ; if source != destination, continue
+    ror edx, 16
+    jne NOT_SAME_SQUARE             ; if source != destination, continue
 
     SetFeedback SAME_SQUARE         ; else set feedback and skip to the end
     jmp SKIP
 
-    NotSameSquare:
-    ; Check if source or destination coords are outside range
-    cmp bl, 7
-    ja OUTSIDE_RANGE
-    cmp bh, 7
-    ja OUTSIDE_RANGE
-    cmp dl, 7
-    cmp dl, 7
-    ja OUTSIDE_RANGE
-    cmp dh, 7
-    ja OUTSIDE_RANGE
-
-    jmp IN_RANGE
-
-    OUTSIDE_RANGE:
-    SetFeedback MOVE_OUTSIDE_RANGE
-    jmp SKIP
-
-    IN_RANGE:
+    NOT_SAME_SQUARE:
     ; Getting the source square
-    ror edx, 16                     ; Switch dx back to source square
     mov esi, OFFSET CHESSBOARD
-    call MoveSPointerToSquare       ; Move esi to the source coords in dx
+    call MoveSPointerToSquare       ; Move esi to coords in dx
 
     ; Remove IS_EN_PASSANTABLE (Pawns can only be en passanted the move after, so we're removing the attribute)
     mov bl, [esi]
     and bl, NO_EN_PASSANT
     mov BYTE PTR [esi], bl
-
-    ;   Series of Premove validations  ;
     
     ; Check if square is empty
     mov al, [esi]
@@ -310,8 +502,8 @@ InputToMove PROC uses edx ecx ebx
     ; Check if player owns the moving piece
     mov al, [esi]               ; Get square info
     mov ah, GAME_STATUS         ; Get Game Status
-    and al, 80h                 ; Isolate piece's is_black bit
-    and ah, 80h                 ; Isolate game status's is_black_turn bit
+    and al, IS_BLACK            ; Isolate piece's is_black bit
+    and ah, IS_BLACK_TURN       ; Isolate game status's is_black_turn bit
     xor al, ah                  ; Check if the color is the same
     jz SOURCE_CORRECT_COLOR     ; If same, continue
 
@@ -322,7 +514,7 @@ InputToMove PROC uses edx ecx ebx
     ; Getting the destination square
     ror edx, 16                 ; Switch dx to the destination square
     mov edi, OFFSET CHESSBOARD
-    call MoveDPointerToSquare
+    call MoveDPointerToSquare   ; Move edi to coords in dx
     ror edx, 16                 ; Switch dx back to source square
     ; Check if there is a piece there
     mov al, [edi]               ; Get destination square info
@@ -332,10 +524,10 @@ InputToMove PROC uses edx ecx ebx
     jmp DONT_CHECK_COLOR        ; else don't check color
 
     CHECK_COLOR:
-    ; Check if capturing piece is the player's
+    ; Check if captured piece is the player's
     ; (Note: ah already has game status's color bit from earlier)
     mov al, [edi]                   ; Get destination square info
-    and al, 80h                     ; Isolate is_black bit
+    and al, IS_BLACK                ; Isolate is_black bit
     xor al, ah                      ; Check if the color is the same
     jnz DONT_CHECK_COLOR            ; If different, continue
 
@@ -344,13 +536,25 @@ InputToMove PROC uses edx ecx ebx
 
     DONT_CHECK_COLOR:
     ; Now we're going to do pathing validations
+    
+
+    SKIP:
+    ret
+PreMoveValidation ENDP
+
+; Checks if the given coords match a move type (parallel, diagonal, etc),
+; Then checks if path is valid
+; Input: edx (Position in this order: y2x2y1x1), esi (source square), edi (destination square)
+; Output: Feedback (0 if valid move, else if invalid)
+InMoveValidation PROC uses eax ebx ecx edx
     ; Check piece type
     call GetPieceLogic
     GetFeedback    
     cmp al, 0
+
     jne SKIP
 
-    call GetCoordsDifference    ; Get difference in coords. al(x) and ah(y) are normal, cl(x) and ch(y) are absolute value
+    call GetCoordsDifference    ; Get difference in coords in edx. al(x) and ah(y) are normal, cl(x) and ch(y) are absolute value
     
     ; Check all of the piece's move abilities to see if it's a valid move
     test bl, DIAGONAL
@@ -436,9 +640,9 @@ InputToMove PROC uses edx ecx ebx
     ;   FORWARD ONLY LOGIC   ;
     ; To check if it's Forward Only, we want to know if y changes, but x is 0
     FORWARD_ONLY_LOGIC:
-    ; Check for a single jump or a double jump
-    test ch, 1
-    jz CHECK_DOUBLE             ; If change in y != 1, check double jump
+    ; Check double jump
+    cmp ch, 1
+    jg CHECK_DOUBLE             ; If double jump (y > 1), check double jump
 
     ; else check if capture
     cmp cx, 0100h
@@ -462,8 +666,8 @@ InputToMove PROC uses edx ecx ebx
 
     mov dl, [edi]               ; Get square info
     mov dh, GAME_STATUS         ; Get Game Status
-    and dl, 80h                 ; Isolate piece's is_black bit
-    and dh, 80h                 ; Isolate game status's is_black_turn bit
+    and dl, IS_BLACK            ; Isolate piece's is_black bit
+    and dh, IS_BLACK_TURN       ; Isolate game status's is_black_turn bit
     xor dl, dh                  ; Check if the color is different
     jnz CHECK_DIRECTION         ; If color is different, continue
     
@@ -477,11 +681,11 @@ InputToMove PROC uses edx ecx ebx
     jnz FORWARD_ONLY_RET        ; If has moved already, go back and give feedback
 
     CHECK_DIRECTION:
-    mov dh, ah                  ; move ah to dh
+    mov dh, ah                  ; move change in y into dx
     mov dl, GAME_STATUS
-    and dl, 80h                 ; Isolate game status's IS_BLACK_TURN bit
+    and dl, IS_BLACK_TURN       ; Isolate game status's IS_BLACK_TURN bit
     xor dh, GAME_STATUS         ; bit is 1 when correct direction
-    and dh, IS_BLACK_TURN       ; Checks if bit is 1 or 0
+    test dh, IS_BLACK_TURN
     jz FORWARD_ONLY_RET         ; If incorrect direction, go back and give feedback
 
     ; Final check, if move isn't diagonal and there's a piece ahead, don't capture
@@ -502,11 +706,12 @@ InputToMove PROC uses edx ecx ebx
 
     SKIP:
     ret
-InputToMove ENDP
+InMoveValidation ENDP
 
 ; Checks the path between source and destination to see if it's valid
-; Input: esi starting position, edi ending position, ah y jump direction, al x jump direction, cl number of jumps, bh max number of jumps for piece type
-CheckPath PROC uses esi
+; Input: esi starting position, edi ending position, ah y jump direction, al x jump direction, 
+;        cl number of jumps, bh max number of jumps for piece type
+CheckPath PROC uses esi eax cx edx
     ; Since we did x1-x2 and y1-y2 before, we have to invert the signs
     ; But since visually rows are in inverse position than they are in the array,
     ; we don't flip the y jump direction (Look at MoveSPointerToSquare for more info)
@@ -565,7 +770,182 @@ CheckPath PROC uses esi
     ret
 CheckPath ENDP
 
-; Assumes move is valid. Checks if path has any attacking pieces
+; Confirms that the move is valid by testing it on a copy of the chessboard
+; Input: esi starting square, edi ending square, 
+PostMoveValidation PROC uses eax ecx ebx edx
+    ; Make a copy of the chessboard
+    call CopyChessboard
+  
+    ; Mark the piece as en passant if it's a pawn and a double square jump
+    ; Check if pawn
+    mov al, [esi]           ; Get piece
+    and al, 0Fh             ; Isolate type
+    cmp al, PAWN
+    jne CHECK_MOVE_TYPE     ; If not a pawn, continue to CHECK_MOVE_TYPE
+    mov ebx, esi
+    sub ebx, edi
+    cmp ebx, 16             ; If move is exactly 2 rows (esi-edi == 16), set en passant
+    je SET_EN_PASSANT
+    neg ebx
+    cmp ebx, 16             ; If move is exactly 2 rows (-(esi-edi) == 16), set en passant
+    jne CHECK_MOVE_TYPE
+    
+    SET_EN_PASSANT:
+    mov al, [esi]
+    or al, IS_EN_PASSANTABLE
+    mov BYTE PTR [esi], al
+
+    CHECK_MOVE_TYPE:
+    mov al, [edi]               ; Get destination square    
+    test al, IS_EN_PASSANTABLE
+    jz NORMAL_MOVE              ; If not en passantable, go to NORMAL_MOVE
+
+    call GetCoordsDifference
+    shl ah, 3                   ; Multiply y * 2^3
+    movsx ecx, ah               ; Expand row
+    movsx ebx, al               ; Expand column
+    neg ebx
+
+    mov al, [esi]               ; Copy source square  
+    or al, HAS_MOVED            ; Mark HAS_MOVED bit for moving piece
+    mov [esi], BYTE PTR 0       ; Clear out source and destination
+    mov [edi], BYTE PTR 0
+    
+    mov edi, esi
+    add edi, ecx                ; Move destination pointer forward one row
+    add edi, ebx                ; Move destination pointer horizontally by one column
+    mov BYTE PTR [edi], al
+    jmp START_KING_SEARCH
+
+    NORMAL_MOVE:
+    mov al, [esi]
+    or al, HAS_MOVED            ; Mark HAS_MOVED bit for moving piece
+    mov BYTE PTR [edi], al      ; Overwrite destination with moving piece
+    mov BYTE PTR [esi], 0       ; Cover up tracks
+
+    START_KING_SEARCH:
+    mov esi, OFFSET CHESSBOARD
+    mov ah, GAME_STATUS
+    and ah, IS_BLACK_TURN
+    
+    call MoveDXToKing
+    
+    mov al, [edi]
+    call CheckForSquareAttacker
+    mov [edi], al
+    GetFeedback
+    cmp al, 0
+    je SKIP                     ; If no attacker, continue
+    
+    ; UNDO CHANGE
+    call UndoCopyChessboard
+    SetFeedback KING_LEFT_IN_CHECK
+
+    SKIP:
+    ret
+PostMoveValidation ENDP
+
+; Check if the previous move was a pawn,
+; If so, check if it needs to be promoted, then promote
+; Input: edi (piece that just moved)
+PawnPromotion PROC uses eax ebx ecx edx
+    mov al, [edi]           ; Get previous piece
+    mov ah, al              ; Make a copy
+    and ah, 0F0h            ; Clear piece type from copy
+    and al, 0Fh             ; Isolate piece type
+    cmp al, PAWN
+    jne SKIP                ; If not a pawn, skip
+
+    ; else continue
+    ror edx, 16             ; Switch coords to destination
+    cmp dh, 7
+    je DO_PROMOTION         ; If y == 7, do promotion
+    cmp dh, 0
+    jne SKIP                ; If y != 0, skip
+
+    ; else, do promotion
+    DO_PROMOTION:
+    mWrite "Promote your pawn  (Q, R, N, B): "
+    GET_INPUT:
+    call ReadChar
+    and al, 11011111b
+
+    cmp al, SYM_QUEEN
+    je QUEEN_P
+
+    cmp al, SYM_ROOK
+    je ROOK_P
+
+    cmp al, SYM_KNIGHT
+    je KNIGHT_P
+
+    cmp al, SYM_BISHOP
+    je BISHOP_P
+
+    jmp GET_INPUT
+
+    QUEEN_P:
+        mov al, QUEEN           ; Set al to QUEEN value
+        or ah, al               ; Change piece in ah to the new piece
+        jmp END_PROMOTION
+    ROOK_P:
+        mov al, ROOK            ; Set al to ROOK value
+        or ah, al               ; Change piece in ah to the new piece
+        jmp END_PROMOTION
+    KNIGHT_P:
+        mov al, KNIGHT          ; Set al to KNIGHT value
+        or ah, al               ; Change piece in ah to the new piece
+        jmp END_PROMOTION
+    BISHOP_P:
+        mov al, BISHOP          ; Set al to BISHOP value
+        or ah, al               ; Change piece in ah to the new piece
+
+    END_PROMOTION:
+    mov [edi], ah
+
+    SKIP:
+    ret
+PawnPromotion ENDP
+
+; Checks if given square is being defended by current player
+; Input: dx (Square coords), edi (Coords of piece that has just moved)
+; Output: FEEDBACK is either 1 (true) or 0 (false)
+CheckForSquareDefender PROC uses edx eax edi
+    ror edx, 16
+
+    mov dl, 7
+    mov dh, 7
+    
+    CHECK_FOR_DEFENEDER:
+    SetFeedback 0
+    call PreMoveValidation
+    GetFeedback
+    cmp al, 0
+    jne NOT_DEFENDER
+
+    call InMoveValidation
+    GetFeedback
+    cmp al, ERROR_KING_CAPTURE
+    je IS_DEFENDER
+    cmp al, 0
+    je IS_DEFENDER
+
+    NOT_DEFENDER:
+    dec dl
+    jns CHECK_FOR_DEFENEDER
+    mov dl, 7
+    dec dh
+    jns CHECK_FOR_DEFENEDER
+    SetFeedback 0
+    jmp SKIP
+
+    IS_DEFENDER:
+    SetFeedback 1
+    SKIP:
+    ret
+CheckForSquareDefender ENDP
+
+; Assumes move is valid. Checks if attack path has any defending pieces
 ; Input: dx starting position, ah y jump direction, al x jump direction, cl number of jumps
 ; Output: FEEDBACK is either 1 (has defenders) or 0 (has no defenders)
 CheckPathForDefenders PROC uses esi
@@ -586,135 +966,28 @@ CheckPathForDefenders PROC uses esi
     SKIP:
     ret
 CheckPathForDefenders ENDP
-
-; Confirms that the move is valid by testing it on a copy of the chessboard
-; If it is, do the move. if it isn't, produce feedback
-; Input: esi starting square, edi ending square, 
-VerifyMove PROC
-    ; Make a copy of the chessboard
-    call CopyChessboard
-  
-    ; Mark the piece as en passant if it's a pawn and a double square jump
-    mov al, [esi]
-    and al, 0Fh
-    cmp al, PAWN
-    jne CHECK_MOVE_TYPE     ; If not a pawn, continue to CHECK_MOVE_TYPE
-    mov ebx, esi
-    sub ebx, edi
-    cmp ebx, 16
-    je SET_EN_PASSANT
-    neg ebx
-    cmp ebx, 16
-    jne CHECK_MOVE_TYPE
-    
-    SET_EN_PASSANT:
-    mov al, [esi]
-    or al, IS_EN_PASSANTABLE
-    mov BYTE PTR [esi], al
-
-    CHECK_MOVE_TYPE:
-    mov al, [edi]      
-    test al, IS_EN_PASSANTABLE
-    jz NORMAL_MOVE              ; If destination square is not en passantable, go to NORMAL_MOVE
-
-    mov al, [esi]               
-    or al, HAS_MOVED            ; Mark HAS_MOVED bit for moving piece
-    mov BYTE PTR [esi], 0
-    mov BYTE PTR [edi], 0
-    movsx ecx, ah               
-    add edi, ecx                ; Move destination pointer forward one row
-    mov BYTE PTR [edi], al
-    jmp START_KING_SEARCH
-
-    NORMAL_MOVE:
-    mov al, [esi]
-    or al, HAS_MOVED            ; Mark HAS_MOVED bit for moving piece
-    mov BYTE PTR [edi], al      ; Overwrite destination with moving piece
-    mov BYTE PTR [esi], 0       ; Cover up tracks
-
-    START_KING_SEARCH:
-    mov esi, OFFSET CHESSBOARD
-    mov ah, GAME_STATUS
-    and ah, IS_BLACK_TURN
-    
-    call MoveDXToKing
-    
-
-    push [edi]
-    push edi
-    call CheckForSquareAttacker
-    pop edi
-    pop [edi]
-    GetFeedback
-    cmp al, 0
-    je SKIP
-    
-    ; UNDO CHANGE
-    call UndoCopyChessboard
-    SetFeedback KING_LEFT_IN_CHECK
-
-    SKIP:
-    ret
-VerifyMove ENDP
-
-; Checks if given square is being defended by current player
-; Input: dx (Square coords), edi (Coords of piece that has just moved)
-; Output: FEEDBACK is either 1 (true) or 0 (false)
-CheckForSquareDefender PROC uses edx eax
-    mov [userInput+2], dl 
-    mov [userInput+3], dh 
-
-    mov dl, 7
-    mov dh, 7
-    
-    CHECK_FOR_ATTACKER:
-    mov [userInput], dl
-    mov [userInput+1], dh
-    call InputToMove
-    GetFeedback
-    cmp al, ERROR_KING_CAPTURE
-    je IS_ATTACKER
-    cmp al, 0
-    je IS_ATTACKER
-
-    dec dl
-    jns CHECK_FOR_ATTACKER
-    mov dl, 7
-    dec dh
-    jns CHECK_FOR_ATTACKER
-    SetFeedback 0
-    jmp SKIP
-
-    IS_ATTACKER:
-    SetFeedback 1
-    SKIP:
-    ret
-CheckForSquareDefender ENDP
-
 ; Checks if given square is being attacked by other player
 ; Input: dx (Square coords), edi (Coords of piece that has just moved)
 ; Output: FEEDBACK is either 1 (true) or 0 (false)
 CheckForSquareAttacker PROC uses ax
-    ; Temporarily switch turn to the opposite player (InputToMove needs this because we want to move the opposing player's pieces)
+    ; Temporarily switch turn to the opposite player (We want to move the opposing player's pieces)
     mov al, GAME_STATUS
-    xor al, IS_BLACK
+    xor al, IS_BLACK_TURN
     mov GAME_STATUS, al
     call CheckForSquareDefender
     mov al, GAME_STATUS
-    xor al, IS_BLACK
+    xor al, IS_BLACK_TURN
     mov GAME_STATUS, al
     ret
 CheckForSquareAttacker ENDP
 
 ; Input: dx (Square coords), edi (Coords of piece that has just moved)
 ; Output: cl (numbers of attackers), ch (number of pieces current player has), bx (Coords of attacker if any)
-; Usage: cl will tell you how many times to pop stack
-CheckForSquareAttackers PROC uses dx
-    mov [userInput+2], dl 
-    mov [userInput+3], dh 
-    ; Temporarily switch turn to the opposite player (InputToMove needs this because we want to move the opposing player's pieces)
+CheckForSquareAttackers PROC uses edx edi
+    ror edx, 16
+    ; Temporarily switch turn to the opposite player (InMoveValidation needs this because we want to move the opposing player's pieces)
     mov al, GAME_STATUS
-    xor al, IS_BLACK
+    xor al, IS_BLACK_TURN
     mov GAME_STATUS, al
 
     mov dl, 7
@@ -723,37 +996,40 @@ CheckForSquareAttackers PROC uses dx
     mov bx, 0
     
     CHECK_FOR_ATTACKER:
-    mov [userInput], dl
-    mov [userInput+1], dh
-    call InputToMove
+    SetFeedback 0
+    call PreMoveValidation
+    GetFeedback
+    cmp al, MISMATCH_OWNER
+    je IS_DEFENDER
+    cmp al, 0
+    jne SKIP_MOVE
+
+    call InMoveValidation
     GetFeedback
     cmp al, ERROR_KING_CAPTURE
     je IS_ATTACKER
     cmp al, 0
     je IS_ATTACKER
 
-    jmp NOT_ATTACKER
+    jmp SKIP_MOVE
 
     IS_ATTACKER:
     mov bx, dx
     inc cl
 
-    NOT_ATTACKER:    
-    cmp al, MISMATCH_OWNER
-    jne NOT_DEFENDER
+    jmp SKIP_MOVE
 
+    IS_DEFENDER:
     inc ch
-
-    NOT_DEFENDER:
+    SKIP_MOVE:
     dec dl
     jns CHECK_FOR_ATTACKER
     mov dl, 7
     dec dh
     jns CHECK_FOR_ATTACKER
-    SetFeedback 0
 
     mov al, GAME_STATUS
-    xor al, IS_BLACK
+    xor al, IS_BLACK_TURN
     mov GAME_STATUS, al
     ret
 CheckForSquareAttackers ENDP
@@ -761,9 +1037,10 @@ CheckForSquareAttackers ENDP
 ; Confirms whether current player's king has a valid move
 ; Input: dx (King)
 ; Output: FEEDBACK zero(true), non-zero(false)
-CanKingMove PROC uses edx
-    mov [userInput], dl 
-    mov [userInput+1], dh 
+CanKingMove PROC uses edx edi
+    push dx
+    ror edx, 16
+    pop dx
 
     dec dl
     dec dh
@@ -771,12 +1048,26 @@ CanKingMove PROC uses edx
     mov ch, 2
 
     CHECK_MOVE:
-    mov [userInput+2], dl
-    mov [userInput+3], dh
-    call InputToMove
+    SetFeedback 0
+    call PreMoveValidation
     GetFeedback
     cmp al, 0
-    je CHECK_VALID
+    jne SKIP_MOVE
+
+    call InMoveValidation
+    GetFeedback
+    cmp al, 0
+    jne SKIP_MOVE
+
+    call PostMoveValidation
+    GetFeedback
+    cmp al, 0
+    jne SKIP_MOVE
+
+    call UndoCopyChessboard
+    jmp SKIP
+
+    SKIP_MOVE:
     inc dl
     dec cl
     jns CHECK_MOVE
@@ -785,16 +1076,6 @@ CanKingMove PROC uses edx
     inc dh
     dec ch
     jns CHECK_MOVE
-    
-    jmp SKIP
-
-    CHECK_VALID:
-    call VerifyMove
-    GetFeedback
-    cmp al, 0
-    jne CHECK_MOVE
-    
-    call UndoCopyChessboard
 
     SKIP:
     ret
@@ -804,7 +1085,7 @@ CanKingMove ENDP
 GetChessInput PROC
     mGotoxy 17,20               ; Move cursor after label "Enter your move: "
 
-    mov edx, OFFSET userInput   ; ReadString takes edx as address
+    mov edx, OFFSET userInput   ; ReadString takes edx as buffer address
     mov ecx, INPUT_SIZE         ; ReadString takes ecx as the input size
     call ReadString
 
@@ -812,25 +1093,39 @@ GetChessInput PROC
 GetChessInput ENDP
 
 ; Gets input from userInput and converts the ascii characters to chessboard coords
+; Input: userInput
+; Output: edx (Converted userInput)
 ProcessInput PROC
     ; Convert characters to decimal values
-    ; Letter
-    mov al, [userInput]     ; First char
-    sub al, 97              
-    mov [userInput], al
-    ; Number
-    mov al, [userInput+1]   ; Second char
-    sub al, 49
-    mov [userInput+1], al
+    ; userInput (a2c4[0123] in memory -> 4c2a[3210] in edx)
+
     ; Letter
     mov al, [userInput+2]   ; Third char
     sub al, 97
-    mov [userInput+2], al
+    mov dl, al          ; Move into dl (x)
     ; Number
     mov al, [userInput+3]   ; Fourth char
     sub al, 49
-    mov [userInput+3], al
+    mov dh, al          ; Move into dh (y)
 
+    ror edx, 16
+
+    ; Letter
+    mov al, [userInput]     ; First char
+    sub al, 97              
+    mov dl, al          ; Move into dl (x)
+    ; Number
+    mov al, [userInput+1]   ; Second char
+    sub al, 49
+    mov dh, al          ; Move into dh (y)
+
+    NotSameSquare:
+    ; Check if coords are inside range (0-7)
+    test edx, 0F8F8F8F8h
+    jz SKIP
+
+    SetFeedback MOVE_OUTSIDE_RANGE
+    SKIP:
     ret
 ProcessInput ENDP
 
@@ -1063,9 +1358,11 @@ PrintPiece PROC uses edx    ; edx is used in PrintChessboard for nonvolitile tem
     ret
 PrintPiece ENDP
 
+; Prints the winner
+; Input: al (GAME_STATUS)
 PrintWinner PROC
     test al, IS_BLACK_TURN
-    jnz BLACK_WON
+    jz BLACK_WON                ; If it's currently white's turn, that means black won
 
     mWriteln "White Won!"
     jmp SKIP
@@ -1076,6 +1373,16 @@ PrintWinner PROC
     SKIP:
     ret
 PrintWinner ENDP
+
+; Prints Stalemate
+PrintStalemate PROC
+    ;test al, IS_BLACK_TURN
+    ;jz WHITE_NO_MOVES           ; If it's currently white's turn, that means white has no moves
+
+    mWriteln "NO ONE WINS LOSERSSSSS"
+
+    ret
+PrintStalemate ENDP
 
 CopyChessboard PROC uses esi edi cx
     mov esi, OFFSET CHESSBOARD
