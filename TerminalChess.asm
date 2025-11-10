@@ -850,9 +850,9 @@ PostMoveValidation ENDP
 ; Input: edi (piece that just moved)
 PawnPromotion PROC uses eax ebx ecx edx
     mov al, [edi]           ; Get previous piece
-    mov ah, al              ; Make a copy
-    and ah, 0F0h            ; Clear piece type from copy
-    and al, 0Fh             ; Isolate piece type
+    mov bl, al              ; Make a copy
+    and bl, 0F0h            ; Clear piece type from copy
+    and al, 00Fh             ; Isolate piece type
     cmp al, PAWN
     jne SKIP                ; If not a pawn, skip
 
@@ -886,22 +886,22 @@ PawnPromotion PROC uses eax ebx ecx edx
 
     QUEEN_P:
         mov al, QUEEN           ; Set al to QUEEN value
-        or ah, al               ; Change piece in ah to the new piece
+        or bl, al               ; Change piece in ah to the new piece
         jmp END_PROMOTION
     ROOK_P:
         mov al, ROOK            ; Set al to ROOK value
-        or ah, al               ; Change piece in ah to the new piece
+        or bl, al               ; Change piece in ah to the new piece
         jmp END_PROMOTION
     KNIGHT_P:
         mov al, KNIGHT          ; Set al to KNIGHT value
-        or ah, al               ; Change piece in ah to the new piece
+        or bl, al               ; Change piece in ah to the new piece
         jmp END_PROMOTION
     BISHOP_P:
         mov al, BISHOP          ; Set al to BISHOP value
-        or ah, al               ; Change piece in ah to the new piece
+        or bl, al               ; Change piece in ah to the new piece
 
     END_PROMOTION:
-    mov [edi], ah
+    mov [edi], bl
 
     SKIP:
     ret
