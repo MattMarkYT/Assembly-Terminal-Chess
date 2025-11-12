@@ -6,17 +6,9 @@ include Macros.inc
 
 include SmallHelpers.inc
 include ChessFeedback.inc
-
-; PIECE INFORMATION
-
-; The pieces on the board are stored as BYTES
-; The 2 left-most bit signifies BLACK/WHITE/EMPTY
-; The next 2 bits signify if the piece has moved once and twice respectively
-; The 4 right-most bits signify the PIECE TYPE
+include ChessHistory.inc
 
 INPUT_SIZE EQU 5
-
-
 
 ; Symbols
 SYM_KING    EQU "K"
@@ -27,9 +19,6 @@ SYM_ROOK    EQU "R"
 SYM_PAWN    EQU "p"
 SYM_BLANK   EQU "-"
 
-; Color - Used when printing the board
-IS_BLACK    EQU 10000000b
-
 ; Piece Types
 KING    EQU 01h
 QUEEN   EQU 02h
@@ -38,10 +27,12 @@ BISHOP  EQU 04h
 ROOK    EQU 05h
 PAWN    EQU 06h
 
-; Special Conditions
-HAS_MOVED           EQU 00100000b
-IS_EN_PASSANTABLE   EQU 00010000b
-NO_EN_PASSANT       EQU 11101111b
+; Piece Data
+IS_BLACK            EQU 10000000b   ; WHITE 0 / BLACK 1
+HAS_MOVED           EQU 01000000b   ; The piece has moved
+WAS_EN_PASSANTED    EQU 00100000b   ; This is used in ChessHistory.asm to save if move was en passant
+IS_EN_PASSANTABLE   EQU 00010000b   ; The piece is en passantable
+NO_EN_PASSANT       EQU 11101111b   ; Clear en passant mask
 
 ; Movement Abilities
 DIAGONAL        EQU 00000001b
@@ -72,12 +63,12 @@ IS_BLACK_TURN   EQU 10000000b
     userInput BYTE INPUT_SIZE DUP(0)
 
     ; 4 left bits hold max number of jumps, 4 right bits hold move abilities (diagonal, parallel, etc)
-    KING_MOVE BYTE      00010011b
-    QUEEN_MOVE BYTE     10000011b
-    KNIGHT_MOVE BYTE    00010100b
-    BISHOP_MOVE BYTE    10000001b
-    ROOK_MOVE BYTE      10000010b
-    PAWN_MOVE BYTE      00101000b
+    KING_MOVE BYTE      00010011b   ; 1 max jump    diagonal, parallel
+    QUEEN_MOVE BYTE     10000011b   ; 8 max jumps   diagonal, parallel
+    KNIGHT_MOVE BYTE    00010100b   ; 1 max jump    L shape
+    BISHOP_MOVE BYTE    10000001b   ; 8 max jumps   diagonal
+    ROOK_MOVE BYTE      10000010b   ; 8 max jumps   parallel
+    PAWN_MOVE BYTE      00101000b   ; 2 max jumps   forward only
 
     GAME_STATUS BYTE 0
     FIFTY_MOVE_RULE BYTE 0
@@ -128,6 +119,7 @@ chess PROC
     ; Reset data
     mov [GAME_STATUS], 0
     mov [FIFTY_MOVE_RULE], 0
+    call ResetChessHistory
 
     jmp StartTurn
         
@@ -163,34 +155,50 @@ chess PROC
         Invoke Str_compare, OFFSET userInput, OFFSET resign_str
         je IS_RESIGN
 
-        call ProcessInput       ; Turns ascii input in userInput into coords ranging from 0-7
+        call ProcessInput           ; Turns ascii input in userInput into coords ranging from 0-7
         GetFeedback
         cmp al, 0
-        jne StartTurnError      ; If FEEDBACK != 0, restart turn
+        jne StartTurnError          ; If FEEDBACK != 0, restart turn
 
     InputValidation:
-        call PreMoveValidation  ; Lots of small checks for pre move validation
+        ; Pre-move Validation
+        call PreMoveValidation      ; Lots of small checks for pre move validation
         GetFeedback
         cmp al, 0
-        jne StartTurnError      ; If FEEDBACK != 0, restart turn
+        jne StartTurnError          ; If FEEDBACK != 0, restart turn
 
-        call InMoveValidation   ; Check if pathing is valid
+        ; In-move Validation
+        call InMoveValidation       ; Check if pathing is valid
         GetFeedback
         cmp al, 0
-        jne StartTurnError      ; If FEEDBACK != 0, restart turn
+        jne StartTurnError          ; If FEEDBACK != 0, restart turn
 
-        call PostMoveValidation ; On a copy, do the move and test if king is in check
-        GetFeedback             ; move FEEDBACK Byte into al
+        call SetCapturedPiece       ; Set ChessHistory captured move
+        call SetMovedPieceBefore    ; Set ChessHistory moved piece before
+
+        ; Post-move Validation
+        call PostMoveValidation     ; On a copy, do the move and test if king is in check
+        GetFeedback                 ; move FEEDBACK Byte into al
         cmp al, 0
-        jne StartTurnError      ; If FEEDBACK != 0, restart turn
+        jne StartTurnError          ; If FEEDBACK != 0, restart turn
 
     ; Input is valid
-    call PawnPromotion          ; Check if Pawn Promotion is in play
+    call PawnPromotion              ; Check if Pawn Promotion is in play
+
+    ; Save History
+    call SetMovedPieceAfter
+    call SetMoveCoords
+    call IncrementChessHistory
 
     ; Switch turn
     mov al, GAME_STATUS
     xor al, IS_BLACK_TURN
     mov GAME_STATUS, al
+
+    ; Increment 50 move rule
+    mov al, FIFTY_MOVE_RULE
+    inc al
+    mov FIFTY_MOVE_RULE, al
 
     add esp, 6                  ; We clear last moved piece from stack since current move is valid
 
@@ -248,7 +256,9 @@ chess PROC
     ret
 chess ENDP
 
-; 
+; A series of checks to determine if player has been checkmated
+; Input: 
+; Output: 
 CheckmateCondition PROC uses edi ax
     mov esi, OFFSET CHESSBOARD
     mov ah, GAME_STATUS
@@ -299,7 +309,7 @@ CheckmateCondition PROC uses edi ax
     ret
 CheckmateCondition ENDP
 
-; Checks if
+; Checks if game is in Stalemate
 ; Output: Feedback (0 if not stalemate, else is stalemate)
 StalemateCondition PROC uses edi
     ; Set coords and pointer to start of array
@@ -311,30 +321,47 @@ StalemateCondition PROC uses edi
     mov ah, GAME_STATUS         ; Get Game Status
     and ah, IS_BLACK_TURN       ; Isolate game status's is_black_turn bit
 
-    ; Search through array, simulate all moves for pieces current player owns
+    ; 1) Check Chess History for Threefold Repetition
+    call CheckThreefoldRepetition
+    jz IS_STALEMATE                    ; If zero flag set, is stalemate
+
+    ; 2) Search through array, simulate all moves for pieces current player owns
     SEARCH_FOR_P:
-    mov al, [esi]               ; Get square info
-    cmp al, 0
-    je SKIP_PIECE               ; If square == 0 (empty), skip this piece
-    and al, IS_BLACK            ; Isolate piece's is_black bit
-    xor al, ah                  ; Check if player owns piece
-    jnz SKIP_PIECE              ; If different color, skip this piece
+        mov al, [esi]               ; Get square info
+        cmp al, 0
+        je SKIP_PIECE               ; If square == 0 (empty), skip this piece
+        and al, IS_BLACK            ; Isolate piece's is_black bit
+        xor al, ah                  ; Check if player owns piece
+        jnz SKIP_PIECE              ; If different color, skip this piece
 
-    CHECK_MOVES:
-    call SimulateAllMoves
-    GetFeedback
-    cmp al, 0
-    je SKIP                     ; If valid move, end loop
+        CHECK_MOVES:
+        call SimulateAllMoves
+        GetFeedback
+        cmp al, 0
+        je FIFTY_RULE               ; If valid move, check more conditions
 
-    SKIP_PIECE:
-    inc esi
-    inc dl                      ; Look at next column
-    cmp dl, 8
-    jl SEARCH_FOR_P             ; If column < 8, go back
-    mov dl, 0                   ; reset column to 0
-    dec dh                      ; Look at next row
-    jns SEARCH_FOR_P            ; If row >= 0, go back
+        SKIP_PIECE:
+        inc esi
+        inc dl                      ; Look at next column
+        cmp dl, 8
+        jl SEARCH_FOR_P             ; If column < 8, go back
+        mov dl, 0                   ; reset column to 0
+        dec dh                      ; Look at next row
+        jns SEARCH_FOR_P            ; If row >= 0, go back
+
+    jmp IS_STALEMATE            ; If found no valid moves, is stalemate
     
+    ; 3) 50 move rule (UNFINISHED)
+    FIFTY_RULE:
+        ;mov al, FIFTY_MOVE_RULE
+        ;cmp FIFTY_MOVE_RULE, 99
+        ;jg IS_STALEMATE
+
+    ; 4) insufficient material (UNIMPLEMENTED)
+
+    jmp SKIP
+
+    IS_STALEMATE:
         SetFeedback 1
         mov al, GAME_STATUS
         or al, GAMEOVER
@@ -392,14 +419,14 @@ SimulateAllMoves PROC uses edi ax
     jz NOT_FORWARD_ONLY
         ; First 2 moves
         mov ch, 2
-        mov eax, 010100h
+        mov eax, 010100h    ; x0y1 then x1y1
         call SimulateMoves
         GetFeedback
         cmp al, 0
         je SKIP
         ; Last move
         mov ch, 1
-        mov eax, 01FFh
+        mov eax, 01FFh      ; x-1y1
         call SimulateMoves
         GetFeedback
         cmp al, 0
@@ -413,7 +440,7 @@ SimulateAllMoves PROC uses edi ax
 SimulateAllMoves ENDP
 
 ; Simulates 4 moves by looking at bx then rotating ebx by a byte
-; Input: ebx (The moves to do), ch (How many moves to do. Recommended 1-4), 
+; Input: ebx (The moves to do), ch (How many moves to do. Required 1-4), 
 ;        esi (Moving piece), dx (coords of moving piece)
 ; Output: Feedback (0 if valid move, else if invalid)
 SimulateMoves PROC uses esi eax ebx ecx edx
@@ -545,7 +572,7 @@ PreMoveValidation ENDP
 ; Checks if the given coords match a move type (parallel, diagonal, etc),
 ; Then checks if path is valid
 ; Input: edx (Position in this order: y2x2y1x1), esi (source square), edi (destination square)
-; Output: Feedback (0 if valid move, else if invalid)
+; Output: Feedback (0 if valid move, else if invalid), edi (moved to captured piece if en passant)
 InMoveValidation PROC uses eax ebx ecx edx
     ; Check piece type
     call GetPieceLogic
@@ -848,12 +875,14 @@ PostMoveValidation ENDP
 ; Check if the previous move was a pawn,
 ; If so, check if it needs to be promoted, then promote
 ; Input: edi (piece that just moved)
-PawnPromotion PROC uses eax ebx ecx edx
+; Output: edi (changes made)
+PawnPromotion PROC uses ebx ecx edx
     mov al, [edi]           ; Get previous piece
     mov bl, al              ; Make a copy
     and bl, 0F0h            ; Clear piece type from copy
     and al, 00Fh             ; Isolate piece type
     cmp al, PAWN
+    mov al, 0               ; zero out al
     jne SKIP                ; If not a pawn, skip
 
     ; else continue
@@ -1186,6 +1215,11 @@ InitChessboard ENDP
 
 ; Simply prints a label saying whose turn it is
 PrintWhoseTurn PROC
+    mWrite "Current History Length: "
+    call GetChessHistoryLength
+    call WriteDec
+    call Crlf
+
     mov al, GAME_STATUS
     test al, IS_BLACK_TURN
     jnz BLACK_TURN
